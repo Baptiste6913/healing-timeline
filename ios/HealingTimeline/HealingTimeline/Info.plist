@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Healing Timeline</string>
+    <key>CFBundleDisplayName</key>
+    <string>Healing Timeline</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.rhinovate.healingtimeline</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>NSCameraUsageDescription</key>
+    <string>Healing Timeline needs camera access to scan your face in 3D for the recovery simulation.</string>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Healing Timeline uses the TrueDepth camera to create a 3D scan of your face.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Save simulation snapshots to your photo library.</string>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+        <string>arkit</string>
+    </array>
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+</dict>
+</plist>

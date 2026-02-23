@@ -1,0 +1,485 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10001 /* HealingTimelineApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10001; };
+		A10002 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10002; };
+		A10003 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10003; };
+		A10004 /* SplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10004; };
+		A10005 /* ScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10005; };
+		A10006 /* ProcessingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10006; };
+		A10007 /* ViewerScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10007; };
+		A10008 /* TimelineControlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10008; };
+		A10009 /* DisclaimerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10009; };
+		A10010 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10010; };
+		A10011 /* ScanViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10011; };
+		A10012 /* ViewerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10012; };
+		A10013 /* HealingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10013; };
+		A10014 /* HealingState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10014; };
+		A10015 /* HealingProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10015; };
+		A10016 /* FaceMeshData.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10016; };
+		A10017 /* ARScanViewRepresentable.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10017; };
+		A10018 /* MeshViewerRepresentable.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10018; };
+		A10019 /* MeshProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10019; };
+		A10020 /* SampleMeshLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10020; };
+		A10021 /* BruiseOverlay.metal in Sources */ = {isa = PBXBuildFile; fileRef = B10021; };
+		A10030 /* HealingTimelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10030; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		B10001 /* HealingTimelineApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealingTimelineApp.swift; sourceTree = "<group>"; };
+		B10002 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		B10003 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		B10004 /* SplashView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashView.swift; sourceTree = "<group>"; };
+		B10005 /* ScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanView.swift; sourceTree = "<group>"; };
+		B10006 /* ProcessingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessingView.swift; sourceTree = "<group>"; };
+		B10007 /* ViewerScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerScreen.swift; sourceTree = "<group>"; };
+		B10008 /* TimelineControlView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineControlView.swift; sourceTree = "<group>"; };
+		B10009 /* DisclaimerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisclaimerView.swift; sourceTree = "<group>"; };
+		B10010 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		B10011 /* ScanViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanViewModel.swift; sourceTree = "<group>"; };
+		B10012 /* ViewerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerViewModel.swift; sourceTree = "<group>"; };
+		B10013 /* HealingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealingModel.swift; sourceTree = "<group>"; };
+		B10014 /* HealingState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealingState.swift; sourceTree = "<group>"; };
+		B10015 /* HealingProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealingProfile.swift; sourceTree = "<group>"; };
+		B10016 /* FaceMeshData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceMeshData.swift; sourceTree = "<group>"; };
+		B10017 /* ARScanViewRepresentable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARScanViewRepresentable.swift; sourceTree = "<group>"; };
+		B10018 /* MeshViewerRepresentable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshViewerRepresentable.swift; sourceTree = "<group>"; };
+		B10019 /* MeshProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshProcessor.swift; sourceTree = "<group>"; };
+		B10020 /* SampleMeshLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleMeshLoader.swift; sourceTree = "<group>"; };
+		B10021 /* BruiseOverlay.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = BruiseOverlay.metal; sourceTree = "<group>"; };
+		B10030 /* HealingTimelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealingTimelineTests.swift; sourceTree = "<group>"; };
+		C10001 /* HealingTimeline.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HealingTimeline.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C10002 /* HealingTimelineTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HealingTimelineTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D10001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		E00001 = {
+			isa = PBXGroup;
+			children = (
+				E00010 /* HealingTimeline */,
+				E00020 /* HealingTimelineTests */,
+				E00099 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E00010 /* HealingTimeline */ = {
+			isa = PBXGroup;
+			children = (
+				D10001 /* Info.plist */,
+				E00011 /* App */,
+				E00012 /* Views */,
+				E00013 /* ViewModels */,
+				E00014 /* Models */,
+				E00015 /* Services */,
+				E00016 /* Shaders */,
+			);
+			path = HealingTimeline;
+			sourceTree = "<group>";
+		};
+		E00011 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				B10001 /* HealingTimelineApp.swift */,
+				B10002 /* AppState.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		E00012 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				B10003 /* ContentView.swift */,
+				B10004 /* SplashView.swift */,
+				B10005 /* ScanView.swift */,
+				B10006 /* ProcessingView.swift */,
+				B10007 /* ViewerScreen.swift */,
+				B10008 /* TimelineControlView.swift */,
+				B10009 /* DisclaimerView.swift */,
+				B10010 /* SettingsView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		E00013 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				B10011 /* ScanViewModel.swift */,
+				B10012 /* ViewerViewModel.swift */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		E00014 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				B10013 /* HealingModel.swift */,
+				B10014 /* HealingState.swift */,
+				B10015 /* HealingProfile.swift */,
+				B10016 /* FaceMeshData.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		E00015 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				B10017 /* ARScanViewRepresentable.swift */,
+				B10018 /* MeshViewerRepresentable.swift */,
+				B10019 /* MeshProcessor.swift */,
+				B10020 /* SampleMeshLoader.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		E00016 /* Shaders */ = {
+			isa = PBXGroup;
+			children = (
+				B10021 /* BruiseOverlay.metal */,
+			);
+			path = Shaders;
+			sourceTree = "<group>";
+		};
+		E00020 /* HealingTimelineTests */ = {
+			isa = PBXGroup;
+			children = (
+				B10030 /* HealingTimelineTests.swift */,
+			);
+			path = HealingTimelineTests;
+			sourceTree = "<group>";
+		};
+		E00099 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C10001 /* HealingTimeline.app */,
+				C10002 /* HealingTimelineTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		F10001 /* HealingTimeline */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = G10001;
+			buildPhases = (
+				F10010 /* Sources */,
+				F10011 /* Frameworks */,
+				F10012 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HealingTimeline;
+			productName = HealingTimeline;
+			productReference = C10001;
+			productType = "com.apple.product-type.application";
+		};
+		F10002 /* HealingTimelineTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = G10002;
+			buildPhases = (
+				F10020 /* Sources */,
+				F10021 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				F10025 /* PBXTargetDependency */,
+			);
+			name = HealingTimelineTests;
+			productName = HealingTimelineTests;
+			productReference = C10002;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		H10001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
+				TargetAttributes = {
+					F10001 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+					F10002 = {
+						CreatedOnToolsVersion = 15.4;
+						TestTargetID = F10001;
+					};
+				};
+			};
+			buildConfigurationList = G10000;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = E00001;
+			productRefGroup = E00099 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F10001 /* HealingTimeline */,
+				F10002 /* HealingTimelineTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		F10010 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10001,
+				A10002,
+				A10003,
+				A10004,
+				A10005,
+				A10006,
+				A10007,
+				A10008,
+				A10009,
+				A10010,
+				A10011,
+				A10012,
+				A10013,
+				A10014,
+				A10015,
+				A10016,
+				A10017,
+				A10018,
+				A10019,
+				A10020,
+				A10021,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F10020 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10030,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		F10011 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F10021 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXResourcesBuildPhase section */
+		F10012 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		F10025 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F10001;
+			targetProxy = F10026;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXContainerItemProxy section */
+		F10026 = {
+			isa = PBXContainerItemProxy;
+			containerPortal = H10001;
+			proxyType = 1;
+			remoteGlobalIDString = F10001;
+			remoteInfo = HealingTimeline;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin XCBuildConfiguration section */
+		/* Project-level Debug */
+		G00001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		/* Project-level Release */
+		G00002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_OPTIMIZATION_LEVEL = s;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		/* App Debug */
+		G10011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HealingTimeline/Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.rhinovate.healingtimeline;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		/* App Release */
+		G10012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HealingTimeline/Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.rhinovate.healingtimeline;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		/* Tests Debug */
+		G10021 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.rhinovate.healingtimeline.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/HealingTimeline.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/HealingTimeline";
+			};
+			name = Debug;
+		};
+		/* Tests Release */
+		G10022 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.rhinovate.healingtimeline.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/HealingTimeline.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/HealingTimeline";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		G10000 /* Build configuration list for PBXProject */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G00001 /* Debug */,
+				G00002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		G10001 /* Build configuration list for PBXNativeTarget "HealingTimeline" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G10011 /* Debug */,
+				G10012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		G10002 /* Build configuration list for PBXNativeTarget "HealingTimelineTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G10021 /* Debug */,
+				G10022 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+	};
+	rootObject = H10001 /* Project object */;
+}

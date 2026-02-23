@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# iOS
+*.xcuserdata/
+*.xcworkspace/
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Output (regenerable)
+data/output/
+model/output/

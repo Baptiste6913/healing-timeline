@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "healing-web",
+      "runtimeExecutable": "C:\\Users\\bapti\\AppData\\Local\\Python\\bin\\python.exe",
+      "runtimeArgs": ["-m", "http.server", "4567", "--directory", "C:\\Users\\bapti\\Downloads\\healing timeline simulation\\web"],
+      "port": 4567
+    }
+  ]
+}
