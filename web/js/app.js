@@ -541,72 +541,94 @@ function calibrateLandmarksTo3D(landmarks) {
     // ── Z depth: DEPTH ANYTHING V2 fusion or MediaPipe fallback ──
     const useDepthMap = capturedDepthMap && capturedDepthMap.data;
 
-    let calibrated;
+    // Always start with MediaPipe Z as the base (reliable structure)
+    const zScale = scale * 1.5;
+    let calibrated = landmarks.map(lm => ({
+        x: (lm.x - centerX) * scale,
+        y: -(lm.y - centerY) * scale,
+        z: -lm.z * zScale
+    }));
 
     if (useDepthMap) {
         // ═══ DEPTH ANYTHING V2 ENHANCED MODE ═══
-        // Use the dense AI depth map for Z coordinates.
-        // MediaPipe XY is accurate; Depth Anything gives per-pixel depth.
+        // Blend the AI depth map with MediaPipe Z for best results.
         //
-        // Strategy:
-        // 1. Sample the depth map at each landmark's (x, y) position
-        // 2. The depth map is relative (0-1): find min/max across face landmarks
-        // 3. Map to anatomical range: face plane = 0, nose tip = +22mm
-        //
-        // This gives MUCH better depth than MediaPipe's Z estimate, which is
-        // a rough approximation from a 2D-trained model.
+        // Key improvements over raw replacement:
+        // 1. Percentile-based normalization (ignores outliers from boundary/background)
+        // 2. Topology-aware smoothing (average with neighbors before mapping)
+        // 3. 60/40 blend with MediaPipe Z (keeps structural correctness)
 
-        console.log('[Calibrate] Using Depth Anything V2 dense depth map');
+        console.log('[Calibrate] Enhancing with Depth Anything V2 dense depth map');
 
         // Sample depth at each landmark
-        const depthSamples = landmarks.map(lm =>
+        const rawDepthSamples = landmarks.map(lm =>
             sampleDepthMap(capturedDepthMap, lm.x, lm.y)
         );
 
-        // Find depth range across face landmarks
-        // Higher depth value = closer to camera in Depth Anything convention
-        let minDepth = Infinity, maxDepth = -Infinity;
-        for (const d of depthSamples) {
-            if (d < minDepth) minDepth = d;
-            if (d > maxDepth) maxDepth = d;
+        // ── Topology-aware smoothing: average each sample with its neighbors ──
+        // This removes high-frequency depth noise that causes visible triangles.
+        const smoothedDepth = [...rawDepthSamples];
+        if (mediapipeTessellation && mediapipeTessellation.length > 0) {
+            const adj = new Map();
+            for (let i = 0; i < landmarks.length; i++) adj.set(i, new Set());
+            for (let t = 0; t < mediapipeTessellation.length; t += 3) {
+                const v0 = mediapipeTessellation[t], v1 = mediapipeTessellation[t+1], v2 = mediapipeTessellation[t+2];
+                if (v0 < landmarks.length && v1 < landmarks.length && v2 < landmarks.length) {
+                    adj.get(v0).add(v1); adj.get(v0).add(v2);
+                    adj.get(v1).add(v0); adj.get(v1).add(v2);
+                    adj.get(v2).add(v0); adj.get(v2).add(v1);
+                }
+            }
+            // 2 passes of neighbor averaging (strong smoothing)
+            for (let pass = 0; pass < 2; pass++) {
+                const prev = [...smoothedDepth];
+                for (let i = 0; i < landmarks.length; i++) {
+                    const neighbors = adj.get(i);
+                    if (!neighbors || neighbors.size === 0) continue;
+                    let sum = prev[i], count = 1;
+                    for (const n of neighbors) { sum += prev[n]; count++; }
+                    smoothedDepth[i] = sum / count;
+                }
+            }
         }
-        const depthRange = maxDepth - minDepth;
 
-        // Target depth range: nose protrusion ~22mm = 0.022 model units
-        // The depth map captures full face depth variation
-        const targetDepthRange = 0.035; // ~35mm face depth variation (nose tip to ears)
+        // ── Percentile-based normalization (ignore outliers) ──
+        const sorted = [...smoothedDepth].sort((a, b) => a - b);
+        const p10 = sorted[Math.floor(sorted.length * 0.10)];
+        const p90 = sorted[Math.floor(sorted.length * 0.90)];
+        const pRange = p90 - p10;
 
-        console.log(`[Calibrate] Depth range: ${minDepth.toFixed(3)} → ${maxDepth.toFixed(3)} (Δ=${depthRange.toFixed(4)})`);
+        // Target depth variation: nose-to-cheek ~22mm
+        const targetDepthRange = 0.022;
 
-        calibrated = landmarks.map((lm, i) => {
-            // Normalize depth: 0 (deepest/furthest) → 1 (closest = nose tip)
-            const normDepth = depthRange > 0.001
-                ? (depthSamples[i] - minDepth) / depthRange
-                : 0;
+        console.log(`[Calibrate] Depth p10=${p10.toFixed(3)}, p90=${p90.toFixed(3)}, Δ=${pRange.toFixed(4)}`);
 
-            return {
-                x: (lm.x - centerX) * scale,
-                y: -(lm.y - centerY) * scale,
-                z: normDepth * targetDepthRange, // 0 = face plane, +0.035 = nose tip
-            };
-        });
+        if (pRange > 0.005) {
+            // Apply depth correction: anatomical depth correction first
+            correctDepthAnatomically(calibrated);
 
-        console.log(`[Calibrate] IPD=${(ipdNorm * 1000).toFixed(1)}px, scale=${scale.toFixed(3)}, depth=DepthAnythingV2`);
+            // Then blend in depth map values (60% depth map, 40% MediaPipe)
+            for (let i = 0; i < calibrated.length; i++) {
+                // Clamp normalized depth to [0, 1]
+                const normDepth = Math.max(0, Math.min(1,
+                    (smoothedDepth[i] - p10) / pRange
+                ));
+
+                const depthZ = normDepth * targetDepthRange;
+                const mediaZ = calibrated[i].z;
+
+                // Blend: 60% AI depth + 40% MediaPipe (keeps structural integrity)
+                calibrated[i].z = depthZ * 0.6 + mediaZ * 0.4;
+            }
+
+            console.log(`[Calibrate] IPD=${(ipdNorm * 1000).toFixed(1)}px, scale=${scale.toFixed(3)}, depth=Blended(DAv2+MP)`);
+        } else {
+            console.log('[Calibrate] Depth map range too narrow — using MediaPipe Z only');
+            correctDepthAnatomically(calibrated);
+        }
 
     } else {
-        // ═══ MEDIAPIPE FALLBACK MODE ═══
-        // Use MediaPipe's relative Z (less accurate but always available)
-        const zScale = scale * 1.5;
-
-        calibrated = landmarks.map(lm => ({
-            x: (lm.x - centerX) * scale,
-            y: -(lm.y - centerY) * scale,
-            z: -lm.z * zScale
-        }));
-
         console.log(`[Calibrate] IPD=${(ipdNorm * 1000).toFixed(1)}px, scale=${scale.toFixed(3)}, depth=MediaPipe`);
-
-        // Anatomical depth correction (only needed for MediaPipe Z)
         correctDepthAnatomically(calibrated);
     }
 
@@ -972,27 +994,37 @@ function buildTrianglesDelaunay(landmarks2D) {
 }
 
 /**
- * Ensure all triangles have outward-facing normals (toward +Z / viewer).
- * After 3D calibration, the face front is toward +Z (nose protrudes in +Z).
- * If average face normal Z is negative, flip all triangle windings.
+ * Fix triangle winding so ALL triangles face the camera (positive Z normal).
+ *
+ * CRITICAL FIX: The previous version checked the GLOBAL sum and flipped ALL
+ * or NONE. MediaPipe tessellation has MIXED winding (some CW, some CCW).
+ * This caused half the normals to point INWARD, making displacement push
+ * vertices into the face → mesh explosion.
+ *
+ * This version checks and fixes EACH triangle individually.
  */
 function ensureOutwardFacing(indices, landmarks) {
-    let sumNz = 0;
+    let flipped = 0;
     for (let i = 0; i < indices.length; i += 3) {
         const a = landmarks[indices[i]], b = landmarks[indices[i + 1]], c = landmarks[indices[i + 2]];
         if (!a || !b || !c) continue;
+
+        // Cross product Z component: positive = face towards camera (CCW)
         const e1x = b.x - a.x, e1y = b.y - a.y;
         const e2x = c.x - a.x, e2y = c.y - a.y;
-        sumNz += e1x * e2y - e1y * e2x;
-    }
+        const nz = e1x * e2y - e1y * e2x;
 
-    if (sumNz < 0) {
-        for (let i = 0; i < indices.length; i += 3) {
+        if (nz < 0) {
+            // Flip this triangle's winding
             const tmp = indices[i + 1];
             indices[i + 1] = indices[i + 2];
             indices[i + 2] = tmp;
+            flipped++;
         }
-        console.log('[Mesh] Flipped triangle winding → normals now face outward');
+    }
+
+    if (flipped > 0) {
+        console.log(`[Mesh] Fixed ${flipped} inverted triangle(s) → consistent outward normals`);
     }
     return indices;
 }
@@ -1608,16 +1640,14 @@ function buildFaceMesh(day) {
 
     // ── ZONE-SPECIFIC DISPLACEMENT ──
     // Each zone has its own swelling timeline (very_slow → fast)
-    const maxSafeDisplacement = faceScale * 0.05;
+    // Displacement cap is TIGHT to prevent any vertex explosion
+    const maxSafeDisplacement = faceScale * 0.025; // ~3.5mm max
     const zoneSwellingMap = state.zoneSwelling || {};
     const maxDispMM = healingModel.maxDisplacementMM;
 
     const skinR = 0.85, skinG = 0.72, skinB = 0.62;
 
-    // ── Compute face centroid + bounding box for displacement & boundary fade ──
-    // Blending vertex normals with radial outward direction prevents
-    // spiky artifacts from inconsistent/noisy per-vertex normals.
-    // Bounding box is used for the elliptical boundary fade (soft edge).
+    // ── Compute face centroid + bounding box for boundary fade ──
     let fcx = 0, fcy = 0, fcz = 0, validCount = 0;
     let bbMinX = Infinity, bbMaxX = -Infinity;
     let bbMinY = Infinity, bbMaxY = -Infinity;
@@ -1638,31 +1668,26 @@ function buildFaceMesh(day) {
     // Background color of the viewer (matches scene.background 0x1a1a2e)
     const bgR = 0.102, bgG = 0.102, bgB = 0.18;
 
+    // ── FIRST PASS: compute displaced positions ──
     for (let i = 0; i < N; i++) {
         const lm = baseLandmarks[i];
         if (!lm) continue;
-        const n = (faceNormals && faceNormals[i]) || { x: 0, y: 0, z: 1 };
         const zw = (zoneWeights && zoneWeights[i]) || DEFAULT_WEIGHT;
 
-        // ── SMOOTH DISPLACEMENT DIRECTION ──
-        // Blend vertex normal (geometry-derived) with radial outward (centroid-derived)
-        // This produces organic, diffuse swelling instead of spiky per-vertex displacement
-        const dx = lm.x - fcx, dy = lm.y - fcy, dz = lm.z - fcz;
-        const dlen = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        const outX = dlen > 1e-8 ? dx / dlen : 0;
-        const outY = dlen > 1e-8 ? dy / dlen : 0;
-        const outZ = dlen > 1e-8 ? dz / dlen : 1;
-
-        // 60% vertex normal + 40% outward direction
-        let dirX = n.x * 0.6 + outX * 0.4;
-        let dirY = n.y * 0.6 + outY * 0.4;
-        let dirZ = n.z * 0.6 + outZ * 0.4;
-        const dirLen = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
-        if (dirLen > 1e-8) { dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen; }
+        // ── DISPLACEMENT DIRECTION: PURE Z-FORWARD ──
+        // Swelling pushes tissue towards the camera (positive Z).
+        // This is clinically accurate AND avoids ALL normal-related artifacts.
+        // No dependency on triangle winding or per-vertex normals.
+        // Small radial XY component (10%) for natural lateral spread.
+        const dx = lm.x - fcx, dy = lm.y - fcy;
+        const xyLen = Math.sqrt(dx * dx + dy * dy);
+        const lateralX = xyLen > 1e-8 ? dx / xyLen * 0.1 : 0;
+        const lateralY = xyLen > 1e-8 ? dy / xyLen * 0.1 : 0;
+        const dirX = lateralX;
+        const dirY = lateralY;
+        const dirZ = 0.995; // ~99.5% forward, ~0.5% lateral
 
         // ── ZONE-SPECIFIC SWELLING DEFORMATION ──
-        // Each zone resolves at its own rate: tip (very_slow) persists
-        // long after periorbital (fast) has fully resolved.
         const zoneRate = zw.healingRate || 'moderate';
         const zoneSwell = zoneSwellingMap[zoneRate] !== undefined
             ? zoneSwellingMap[zoneRate] : (state.swellingLevel || 0);
