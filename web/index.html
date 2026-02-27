@@ -53,6 +53,7 @@
             <p class="tagline">Visualize your recovery journey</p>
 
             <div id="loading-status" class="loading-status">Loading face detection model...</div>
+            <div id="depth-status" class="depth-status"></div>
 
             <button id="start-btn" class="btn-primary btn-large" disabled>Start Face Scan</button>
             <button id="demo-btn" class="btn-secondary">Use Sample Mesh (Demo)</button>
@@ -99,7 +100,7 @@
         <div class="processing-content">
             <div class="spinner"></div>
             <h2>Processing your scan...</h2>
-            <p>Building 3D mesh and preparing simulation</p>
+            <p id="processing-detail">Building 3D mesh and preparing simulation</p>
         </div>
     </div>
 

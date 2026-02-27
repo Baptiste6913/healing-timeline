@@ -128,8 +128,16 @@ body {
 .loading-status {
     font-size: 13px;
     color: var(--text2);
-    margin-bottom: 8px;
+    margin-bottom: 4px;
     min-height: 20px;
+}
+
+.depth-status {
+    font-size: 11px;
+    color: var(--accent);
+    margin-bottom: 8px;
+    min-height: 16px;
+    opacity: 0.8;
 }
 
 /* ── Scan ──────────────────────────────────────────────────────────── */

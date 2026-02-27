@@ -5,7 +5,8 @@
  * - High-resolution camera capture (1920×1080)
  * - Multi-frame landmark averaging (8 frames) for stability
  * - IPD-calibrated 3D coordinates for accurate facial proportions
- * - 2-level mesh subdivision (~468 → ~2000 → ~8000 vertices)
+ * - **Depth Anything V2** — AI dense depth map for per-pixel depth refinement
+ * - 3-level mesh subdivision (~468 → ~1800 → ~7200 → ~28800 vertices)
  * - HC Laplacian smoothing (feature-preserving — keeps nose bridge & nostrils)
  * - Capped deformation to prevent vertex collapse at high swelling
  * - MeshPhysicalMaterial with skin-like sheen & clearcoat rendering
@@ -52,6 +53,12 @@ let Delaunator = null;
 // (much cleaner than Delaunay: no convex hull artifacts, proper face boundary)
 let mediapipeTessellation = null;
 
+// Depth Anything V2 — dense per-pixel depth estimation
+let depthEstimator = null;
+let depthModelReady = false;
+let depthModelLoading = false;
+let capturedDepthMap = null; // { data: Float32Array, width, height }
+
 // Default zone weight — defensive fallback for null/undefined entries
 const DEFAULT_WEIGHT = Object.freeze({
     zone: 'none', weight: 0, color: [0.15, 0.15, 0.15], isBruiseZone: false, healingRate: 'moderate'
@@ -75,6 +82,9 @@ async function initMediaPipe() {
 
     // Load Delaunator in parallel for robust triangulation
     loadDelaunator();
+
+    // Load Depth Anything V2 in parallel (non-blocking — face scan still works without it)
+    initDepthModel();
 
     try {
         const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
@@ -109,12 +119,149 @@ async function initMediaPipe() {
             console.warn('[MediaPipe] No tessellation data — will use fallback');
         }
 
-        statusEl.textContent = 'Ready!';
+        statusEl.textContent = depthModelReady
+            ? 'Ready! (with AI depth)'
+            : 'Ready! (loading AI depth...)';
         document.getElementById('start-btn').disabled = false;
     } catch (err) {
         console.error('[MediaPipe] Init failed:', err);
         statusEl.textContent = 'Failed to load model. Check internet connection.';
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DEPTH ANYTHING V2 — Dense per-pixel depth estimation
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Load Depth Anything V2 Small via Transformers.js (ONNX, ~25MB).
+ * Runs in parallel with MediaPipe — does NOT block face scanning.
+ * Uses WebGPU when available, falls back to WASM.
+ */
+async function initDepthModel() {
+    if (depthModelLoading || depthModelReady) return;
+    depthModelLoading = true;
+
+    const depthStatusEl = document.getElementById('depth-status');
+    const updateDepthUI = (msg) => { if (depthStatusEl) depthStatusEl.textContent = msg; };
+
+    try {
+        updateDepthUI('Loading AI depth engine...');
+        console.log('[Depth] Loading Transformers.js...');
+
+        const { pipeline, env } = await import(
+            'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.1'
+        );
+
+        // Disable local model caching to prevent storage issues on mobile
+        env.allowLocalModels = false;
+        // Use remote models from Hugging Face
+        env.useBrowserCache = true;
+
+        // Detect best available backend
+        let device = 'wasm'; // safe default
+        if (typeof navigator !== 'undefined' && navigator.gpu) {
+            try {
+                const adapter = await navigator.gpu.requestAdapter();
+                if (adapter) device = 'webgpu';
+            } catch (e) { /* WebGPU not available, fall back to wasm */ }
+        }
+
+        updateDepthUI(`Downloading depth model (~25 MB, ${device.toUpperCase()})...`);
+        console.log(`[Depth] Initializing Depth Anything V2 Small (${device})...`);
+
+        depthEstimator = await pipeline(
+            'depth-estimation',
+            'onnx-community/depth-anything-v2-small',
+            {
+                device: device,
+                dtype: 'fp32',
+            }
+        );
+
+        depthModelReady = true;
+        depthModelLoading = false;
+        console.log(`[Depth] ✓ Depth Anything V2 Small ready (${device})`);
+
+        // Update status
+        updateDepthUI(`✓ AI depth ready (${device.toUpperCase()})`);
+
+        if (currentScreen === 'splash') {
+            const statusEl = document.getElementById('loading-status');
+            if (statusEl) statusEl.textContent = 'Ready!';
+        }
+    } catch (err) {
+        console.warn('[Depth] Depth model failed to load (non-critical):', err.message);
+        depthModelLoading = false;
+        updateDepthUI('AI depth unavailable — using standard mode');
+        // App continues to work without depth — MediaPipe Z is the fallback
+    }
+}
+
+/**
+ * Run Depth Anything V2 on an image/canvas and return a normalized depth map.
+ * Returns { data: Float32Array (0-1, higher = closer), width, height } or null.
+ */
+async function estimateDepth(imageSource) {
+    if (!depthEstimator) return null;
+
+    try {
+        console.log('[Depth] Running depth estimation...');
+        const t0 = performance.now();
+
+        const result = await depthEstimator(imageSource);
+        const depthImage = result.depth; // RawImage object
+
+        const t1 = performance.now();
+        console.log(`[Depth] Depth estimation: ${(t1 - t0).toFixed(0)}ms → ${depthImage.width}×${depthImage.height}`);
+
+        // Convert to normalized Float32Array (0 = far, 1 = near)
+        const pixels = depthImage.data; // Uint8Array (grayscale 0-255)
+        const depthData = new Float32Array(depthImage.width * depthImage.height);
+        for (let i = 0; i < depthData.length; i++) {
+            depthData[i] = pixels[i] / 255.0;
+        }
+
+        return {
+            data: depthData,
+            width: depthImage.width,
+            height: depthImage.height,
+        };
+    } catch (err) {
+        console.warn('[Depth] Estimation failed:', err.message);
+        return null;
+    }
+}
+
+/**
+ * Sample the depth map at a given (u, v) position using bilinear interpolation.
+ * u, v are in [0, 1] (normalized image coordinates).
+ * Returns a depth value in [0, 1] (higher = closer to camera).
+ */
+function sampleDepthMap(depthMap, u, v) {
+    if (!depthMap || !depthMap.data) return 0.5;
+
+    const fx = u * (depthMap.width - 1);
+    const fy = v * (depthMap.height - 1);
+
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const x1 = Math.min(x0 + 1, depthMap.width - 1);
+    const y1 = Math.min(y0 + 1, depthMap.height - 1);
+
+    const wx = fx - x0;
+    const wy = fy - y0;
+
+    const d00 = depthMap.data[y0 * depthMap.width + x0];
+    const d10 = depthMap.data[y0 * depthMap.width + x1];
+    const d01 = depthMap.data[y1 * depthMap.width + x0];
+    const d11 = depthMap.data[y1 * depthMap.width + x1];
+
+    // Bilinear interpolation
+    return (d00 * (1 - wx) * (1 - wy)) +
+           (d10 * wx * (1 - wy)) +
+           (d01 * (1 - wx) * wy) +
+           (d11 * wx * wy);
 }
 
 /**
@@ -391,24 +538,77 @@ function calibrateLandmarksTo3D(landmarks) {
     // Real face width ≈ 2.2 × IPD
     faceScale = targetIPD * 2.2; // ~0.139
 
-    // ── Z depth calibration ──
-    // MediaPipe z is relative to face width in image space.
-    // Boosted scale to preserve nose protrusion and facial depth.
-    const zScale = scale * 1.5;
+    // ── Z depth: DEPTH ANYTHING V2 fusion or MediaPipe fallback ──
+    const useDepthMap = capturedDepthMap && capturedDepthMap.data;
 
-    // ── Convert all landmarks ──
-    const calibrated = landmarks.map(lm => ({
-        x: (lm.x - centerX) * scale,
-        y: -(lm.y - centerY) * scale,
-        z: -lm.z * zScale
-    }));
+    let calibrated;
 
-    console.log(`[Calibrate] IPD=${(ipdNorm * 1000).toFixed(1)}px norm, scale=${scale.toFixed(3)}, faceWidth=${(faceScale * 1000).toFixed(1)}mm`);
+    if (useDepthMap) {
+        // ═══ DEPTH ANYTHING V2 ENHANCED MODE ═══
+        // Use the dense AI depth map for Z coordinates.
+        // MediaPipe XY is accurate; Depth Anything gives per-pixel depth.
+        //
+        // Strategy:
+        // 1. Sample the depth map at each landmark's (x, y) position
+        // 2. The depth map is relative (0-1): find min/max across face landmarks
+        // 3. Map to anatomical range: face plane = 0, nose tip = +22mm
+        //
+        // This gives MUCH better depth than MediaPipe's Z estimate, which is
+        // a rough approximation from a 2D-trained model.
 
-    // ── Anatomical depth correction ──
-    // MediaPipe's Z is compressed and noisy. Correct using known anatomy:
-    // nose protrusion = ~22mm (35% of IPD) above the face plane.
-    correctDepthAnatomically(calibrated);
+        console.log('[Calibrate] Using Depth Anything V2 dense depth map');
+
+        // Sample depth at each landmark
+        const depthSamples = landmarks.map(lm =>
+            sampleDepthMap(capturedDepthMap, lm.x, lm.y)
+        );
+
+        // Find depth range across face landmarks
+        // Higher depth value = closer to camera in Depth Anything convention
+        let minDepth = Infinity, maxDepth = -Infinity;
+        for (const d of depthSamples) {
+            if (d < minDepth) minDepth = d;
+            if (d > maxDepth) maxDepth = d;
+        }
+        const depthRange = maxDepth - minDepth;
+
+        // Target depth range: nose protrusion ~22mm = 0.022 model units
+        // The depth map captures full face depth variation
+        const targetDepthRange = 0.035; // ~35mm face depth variation (nose tip to ears)
+
+        console.log(`[Calibrate] Depth range: ${minDepth.toFixed(3)} → ${maxDepth.toFixed(3)} (Δ=${depthRange.toFixed(4)})`);
+
+        calibrated = landmarks.map((lm, i) => {
+            // Normalize depth: 0 (deepest/furthest) → 1 (closest = nose tip)
+            const normDepth = depthRange > 0.001
+                ? (depthSamples[i] - minDepth) / depthRange
+                : 0;
+
+            return {
+                x: (lm.x - centerX) * scale,
+                y: -(lm.y - centerY) * scale,
+                z: normDepth * targetDepthRange, // 0 = face plane, +0.035 = nose tip
+            };
+        });
+
+        console.log(`[Calibrate] IPD=${(ipdNorm * 1000).toFixed(1)}px, scale=${scale.toFixed(3)}, depth=DepthAnythingV2`);
+
+    } else {
+        // ═══ MEDIAPIPE FALLBACK MODE ═══
+        // Use MediaPipe's relative Z (less accurate but always available)
+        const zScale = scale * 1.5;
+
+        calibrated = landmarks.map(lm => ({
+            x: (lm.x - centerX) * scale,
+            y: -(lm.y - centerY) * scale,
+            z: -lm.z * zScale
+        }));
+
+        console.log(`[Calibrate] IPD=${(ipdNorm * 1000).toFixed(1)}px, scale=${scale.toFixed(3)}, depth=MediaPipe`);
+
+        // Anatomical depth correction (only needed for MediaPipe Z)
+        correctDepthAnatomically(calibrated);
+    }
 
     return calibrated;
 }
@@ -813,7 +1013,7 @@ function isMobileDevice() {
  * Update the processing screen status text.
  */
 function updateProcessingStatus(msg) {
-    const el = document.querySelector('#screen-processing p');
+    const el = document.getElementById('processing-detail');
     if (el) el.textContent = msg;
 }
 
@@ -893,6 +1093,26 @@ function captureFace() {
 
     (async () => {
         try {
+            // ─── Step 0: AI DEPTH ESTIMATION (Depth Anything V2) ───
+            // Run dense depth estimation on the captured frame.
+            // This happens BEFORE 3D calibration so the depth map is in image space.
+            capturedDepthMap = null;
+            if (depthModelReady && depthEstimator) {
+                updateProcessingStatus('AI depth analysis...');
+                await yieldToUI();
+
+                try {
+                    capturedDepthMap = await estimateDepth(texCanvas);
+                    if (capturedDepthMap) {
+                        console.log(`[Process] Step 0: Depth map ${capturedDepthMap.width}×${capturedDepthMap.height}`);
+                    }
+                } catch (depthErr) {
+                    console.warn('[Process] Depth estimation failed (continuing with MediaPipe Z):', depthErr.message);
+                }
+            } else {
+                console.log('[Process] Depth model not ready — using MediaPipe Z fallback');
+            }
+
             // ─── Step 1: TRIANGULATION ───
             // Prefer MediaPipe tessellation (proper face topology, clean boundary).
             // Delaunay creates convex hull artifacts and jagged boundary.
