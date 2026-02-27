@@ -48,6 +48,11 @@ let faceScale = 0.14;
 // Delaunay triangulation library (loaded async from CDN)
 let Delaunator = null;
 
+// Default zone weight — defensive fallback for null/undefined entries
+const DEFAULT_WEIGHT = Object.freeze({
+    zone: 'none', weight: 0, color: [0.15, 0.15, 0.15], isBruiseZone: false
+});
+
 // Model
 let healingModel = new HealingModelJS.HealingModel();
 let currentDay = 0;
@@ -409,7 +414,10 @@ function subdivideMesh(landmarks, indices, uvData, weights) {
     const edgeMap = new Map();
     const newLandmarks = landmarks.map(lm => ({ ...lm }));
     const newUVs = uvData ? uvData.map(uv => ({ ...uv })) : null;
-    const newWeights = weights.map(w => ({ ...w, color: [...w.color] }));
+    const newWeights = weights.map(w => {
+        if (!w) return { ...DEFAULT_WEIGHT };
+        return { ...w, color: Array.isArray(w.color) ? [...w.color] : [0.15, 0.15, 0.15] };
+    });
     const newIndices = [];
 
     function getMidpoint(i0, i1) {
@@ -436,17 +444,20 @@ function subdivideMesh(landmarks, indices, uvData, weights) {
             newUVs.push({ u: 0.5, v: 0.5 });
         }
 
-        // Interpolate zone weight
-        const w0 = weights[i0], w1 = weights[i1];
+        // Interpolate zone weight (with defensive null guards)
+        const w0 = weights[i0] || DEFAULT_WEIGHT;
+        const w1 = weights[i1] || DEFAULT_WEIGHT;
+        const c0 = Array.isArray(w0.color) ? w0.color : [0.15, 0.15, 0.15];
+        const c1 = Array.isArray(w1.color) ? w1.color : [0.15, 0.15, 0.15];
         newWeights.push({
-            zone: w0.weight >= w1.weight ? w0.zone : w1.zone,
-            weight: (w0.weight + w1.weight) / 2,
+            zone: (w0.weight || 0) >= (w1.weight || 0) ? w0.zone : w1.zone,
+            weight: ((w0.weight || 0) + (w1.weight || 0)) / 2,
             color: [
-                (w0.color[0] + w1.color[0]) / 2,
-                (w0.color[1] + w1.color[1]) / 2,
-                (w0.color[2] + w1.color[2]) / 2,
+                (c0[0] + c1[0]) / 2,
+                (c0[1] + c1[1]) / 2,
+                (c0[2] + c1[2]) / 2,
             ],
-            isBruiseZone: w0.isBruiseZone || w1.isBruiseZone,
+            isBruiseZone: !!(w0.isBruiseZone || w1.isBruiseZone),
         });
 
         edgeMap.set(key, idx);
@@ -1279,14 +1290,19 @@ function buildFaceMesh(day) {
     // ── Compute face centroid for smooth displacement directions ──
     // Blending vertex normals with radial outward direction prevents
     // spiky artifacts from inconsistent/noisy per-vertex normals.
-    let fcx = 0, fcy = 0, fcz = 0;
-    for (const lm of baseLandmarks) { fcx += lm.x; fcy += lm.y; fcz += lm.z; }
-    fcx /= N; fcy /= N; fcz /= N;
+    let fcx = 0, fcy = 0, fcz = 0, validCount = 0;
+    for (const lm of baseLandmarks) {
+        if (!lm) continue;
+        fcx += lm.x; fcy += lm.y; fcz += lm.z;
+        validCount++;
+    }
+    if (validCount > 0) { fcx /= validCount; fcy /= validCount; fcz /= validCount; }
 
     for (let i = 0; i < N; i++) {
         const lm = baseLandmarks[i];
-        const n = faceNormals[i];
-        const zw = zoneWeights[i];
+        if (!lm) continue;
+        const n = (faceNormals && faceNormals[i]) || { x: 0, y: 0, z: 1 };
+        const zw = (zoneWeights && zoneWeights[i]) || DEFAULT_WEIGHT;
 
         // ── SMOOTH DISPLACEMENT DIRECTION ──
         // Blend vertex normal (geometry-derived) with radial outward (centroid-derived)
@@ -1321,8 +1337,9 @@ function buildFaceMesh(day) {
         let r, g, b;
 
         if (showZones) {
-            const [zr, zg, zb] = zw.color || [0.15, 0.15, 0.15];
-            const mix = Math.max(0.2, zw.weight);
+            const zColor = Array.isArray(zw.color) ? zw.color : [0.15, 0.15, 0.15];
+            const [zr, zg, zb] = zColor;
+            const mix = Math.max(0.2, zw.weight || 0);
             r = skinR * (1 - mix) + zr * mix;
             g = skinG * (1 - mix) + zg * mix;
             b = skinB * (1 - mix) + zb * mix;

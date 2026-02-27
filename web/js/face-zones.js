@@ -288,10 +288,11 @@ const FaceZones = (() => {
      */
     function computeZoneWeights(landmarks) {
         const landmarkMap = buildLandmarkMap();
-        const weights = new Array(468);
+        const N = landmarks ? landmarks.length : 468;
+        const weights = new Array(N);
 
         // First pass: assign explicit zone members
-        for (let i = 0; i < 468; i++) {
+        for (let i = 0; i < N; i++) {
             const explicit = landmarkMap.get(i);
             if (explicit) {
                 weights[i] = { ...explicit };
@@ -301,10 +302,15 @@ const FaceZones = (() => {
         }
 
         // Second pass: distance-based falloff for unassigned vertices
-        for (let i = 0; i < 468; i++) {
+        for (let i = 0; i < N; i++) {
             if (weights[i] !== null) continue;
 
             const pos = landmarks[i];
+            // Guard against missing/undefined landmark positions
+            if (!pos || typeof pos.x !== 'number') {
+                weights[i] = { zone: "none", weight: 0, color: [0.15, 0.15, 0.15], isBruiseZone: false };
+                continue;
+            }
             let bestWeight = 0;
             let bestColor = [0.15, 0.15, 0.15]; // dark gray = no zone
             let bestZone = "none";
