@@ -123,9 +123,10 @@
                 </div>
             </div>
 
-            <!-- Day label -->
+            <!-- Day label + clinical milestone -->
             <div class="day-label-row">
                 <h2 id="day-label">Surgery Day</h2>
+                <p id="day-milestone" class="day-milestone">Cast/splint in place</p>
             </div>
 
             <!-- 3D Canvas -->
@@ -159,6 +160,19 @@
                 <!-- Options row -->
                 <div class="options-row">
                     <div class="option-group">
+                        <label>Approach</label>
+                        <select id="opt-approach">
+                            <option value="open" selected>Open</option>
+                            <option value="closed">Closed</option>
+                        </select>
+                    </div>
+                    <div class="option-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="opt-osteotomy" checked>
+                            Osteotomy
+                        </label>
+                    </div>
+                    <div class="option-group">
                         <label>Skin</label>
                         <select id="opt-skin">
                             <option value="thin">Thin</option>
@@ -174,6 +188,8 @@
                             <option value="high">High</option>
                         </select>
                     </div>
+                </div>
+                <div class="options-row" style="margin-top:6px">
                     <div class="option-group">
                         <label class="checkbox-label">
                             <input type="checkbox" id="opt-bruising" checked>

@@ -2,7 +2,17 @@
  * face-zones.js — Anatomical zone mapping for MediaPipe Face Mesh (468 landmarks).
  *
  * Maps every relevant landmark to a rhinoplasty-relevant anatomical zone.
- * Each zone has a healing weight (0-1) controlling mesh deformation magnitude.
+ * Each zone has:
+ *   - weight (0-1): controls mesh deformation magnitude
+ *   - healingRate: controls temporal resolution speed (very_slow → fast)
+ *   - color: visualization color for zone overlay
+ *   - isBruiseZone: whether bruising appears here
+ *
+ * healingRate values match HealingModelJS.ZONE_HEALING_RATES:
+ *   very_slow — Nasal tip: 12-18 month resolution
+ *   slow      — Supratip, columella: 9-12 months
+ *   moderate  — Dorsum, alae, nostrils: 6-9 months (baseline)
+ *   fast      — Periorbital, cheeks, lip: 2-6 weeks
  *
  * Landmark indices reference: MediaPipe Face Mesh 468-point topology.
  * See: https://github.com/google/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model.obj
@@ -24,6 +34,7 @@ const FaceZones = (() => {
         nasal_tip: {
             landmarks: [1, 2, 4, 5, 19, 94, 141, 370],
             weight: 1.0,
+            healingRate: 'very_slow',
             color: [1.0, 0.2, 0.2],  // red — highest impact
             label: "Nasal Tip (Pronasale)",
             description: "Maximum swelling zone. Longest recovery (up to 18 months for thick skin)."
@@ -35,6 +46,7 @@ const FaceZones = (() => {
         supratip: {
             landmarks: [4, 5, 45, 275, 44, 274, 195],
             weight: 0.9,
+            healingRate: 'slow',
             color: [1.0, 0.35, 0.15],
             label: "Supratip",
             description: "Transition zone above tip. Significant swelling, defines tip projection."
@@ -46,6 +58,7 @@ const FaceZones = (() => {
         nasal_dorsum: {
             landmarks: [6, 122, 168, 193, 195, 197, 351, 417, 245, 465, 196, 419, 248, 281, 51, 3, 196, 248],
             weight: 0.7,
+            healingRate: 'moderate',
             color: [1.0, 0.55, 0.0],  // orange
             label: "Nasal Dorsum (Bridge)",
             description: "Moderate swelling from osteotomy. Resolves faster than tip."
@@ -57,6 +70,7 @@ const FaceZones = (() => {
         columella: {
             landmarks: [0, 2, 164, 165, 167],
             weight: 0.8,
+            healingRate: 'slow',
             color: [1.0, 0.4, 0.1],
             label: "Columella",
             description: "Between nostrils. Open rhinoplasty incision site. Significant swelling."
@@ -72,6 +86,7 @@ const FaceZones = (() => {
                 174, 188, 196, 198, 209            // alar-cheek junction
             ],
             weight: 0.5,
+            healingRate: 'moderate',
             color: [1.0, 0.75, 0.0],  // amber
             label: "Left Alar (Nasal Wing)",
             description: "Moderate swelling. Alar reduction site if performed."
@@ -86,6 +101,7 @@ const FaceZones = (() => {
                 399, 412, 420, 422, 429               // alar-cheek junction
             ],
             weight: 0.5,
+            healingRate: 'moderate',
             color: [1.0, 0.75, 0.0],
             label: "Right Alar (Nasal Wing)",
             description: "Moderate swelling. Alar reduction site if performed."
@@ -100,6 +116,7 @@ const FaceZones = (() => {
                 237, 238, 239, 240, 241, 242
             ],
             weight: 0.6,
+            healingRate: 'moderate',
             color: [0.9, 0.6, 0.1],
             label: "Left Nostril Rim",
             description: "Nostril border. Swelling may temporarily affect airflow."
@@ -113,6 +130,7 @@ const FaceZones = (() => {
                 457, 458, 459, 460, 461, 462
             ],
             weight: 0.6,
+            healingRate: 'moderate',
             color: [0.9, 0.6, 0.1],
             label: "Right Nostril Rim",
             description: "Nostril border. Swelling may temporarily affect airflow."
@@ -132,6 +150,7 @@ const FaceZones = (() => {
                 229, 230, 231, 232, 233, 234
             ],
             weight: 0.4,
+            healingRate: 'fast',
             color: [0.5, 0.2, 0.8],  // purple — bruise zone
             label: "Left Periorbital (Under-eye)",
             description: "Primary bruising zone. Ecchymosis peaks Day 2-3, resolves by Day 14.",
@@ -147,6 +166,7 @@ const FaceZones = (() => {
                 449, 450, 451, 452, 453, 454
             ],
             weight: 0.4,
+            healingRate: 'fast',
             color: [0.5, 0.2, 0.8],
             label: "Right Periorbital (Under-eye)",
             description: "Primary bruising zone. Ecchymosis peaks Day 2-3, resolves by Day 14.",
@@ -167,6 +187,7 @@ const FaceZones = (() => {
                 138, 213, 215
             ],
             weight: 0.2,
+            healingRate: 'fast',
             color: [0.3, 0.5, 0.9],  // blue — low impact
             label: "Left Cheek (Malar)",
             description: "Mild swelling. Bruising may spread here from periorbital area.",
@@ -183,6 +204,7 @@ const FaceZones = (() => {
                 367, 433, 435
             ],
             weight: 0.2,
+            healingRate: 'fast',
             color: [0.3, 0.5, 0.9],
             label: "Right Cheek (Malar)",
             description: "Mild swelling. Bruising may spread here from periorbital area.",
@@ -201,6 +223,7 @@ const FaceZones = (() => {
                 393, 409, 410, 415, 416
             ],
             weight: 0.15,
+            healingRate: 'fast',
             color: [0.2, 0.6, 0.6],  // teal — minimal
             label: "Upper Lip Area",
             description: "Minimal swelling. Numbness possible if columella incision."
@@ -256,7 +279,7 @@ const FaceZones = (() => {
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Build a lookup: landmarkIndex -> { zoneName, weight, color, isBruiseZone }
+     * Build a lookup: landmarkIndex -> { zoneName, weight, color, isBruiseZone, healingRate }
      */
     function buildLandmarkMap() {
         const map = new Map();
@@ -269,7 +292,8 @@ const FaceZones = (() => {
                         zone: zoneName,
                         weight: zone.weight,
                         color: zone.color,
-                        isBruiseZone: zone.isBruiseZone || false
+                        isBruiseZone: zone.isBruiseZone || false,
+                        healingRate: zone.healingRate || 'moderate'
                     });
                 }
             }
@@ -278,13 +302,13 @@ const FaceZones = (() => {
     }
 
     /**
-     * Compute per-vertex zone weights for all 468 landmarks.
+     * Compute per-vertex zone weights for all landmarks.
      * Uses a hybrid approach:
      * 1) Hard assignment for landmarks explicitly listed in zones
      * 2) Distance-based gaussian falloff for unlisted landmarks
      *
-     * @param {Array} landmarks - Array of {x, y, z} for 468 points
-     * @returns {Array} - 468-element array of {weight, color, isBruiseZone, zone}
+     * @param {Array} landmarks - Array of {x, y, z} positions
+     * @returns {Array} - Array of {weight, color, isBruiseZone, zone, healingRate}
      */
     function computeZoneWeights(landmarks) {
         const landmarkMap = buildLandmarkMap();
@@ -308,13 +332,14 @@ const FaceZones = (() => {
             const pos = landmarks[i];
             // Guard against missing/undefined landmark positions
             if (!pos || typeof pos.x !== 'number') {
-                weights[i] = { zone: "none", weight: 0, color: [0.15, 0.15, 0.15], isBruiseZone: false };
+                weights[i] = { zone: "none", weight: 0, color: [0.15, 0.15, 0.15], isBruiseZone: false, healingRate: 'moderate' };
                 continue;
             }
             let bestWeight = 0;
             let bestColor = [0.15, 0.15, 0.15]; // dark gray = no zone
             let bestZone = "none";
             let isBruise = false;
+            let bestHealingRate = 'moderate';
 
             // Check distance to each reference point
             for (const [refName, refIdx] of Object.entries(REFERENCE_POINTS)) {
@@ -339,6 +364,7 @@ const FaceZones = (() => {
                     bestColor = refZone.color;
                     bestZone = refZone.zone;
                     isBruise = refZone.isBruiseZone;
+                    bestHealingRate = refZone.healingRate || 'moderate';
                 }
             }
 
@@ -346,7 +372,8 @@ const FaceZones = (() => {
                 zone: bestZone,
                 weight: Math.max(0, Math.min(1, bestWeight)),
                 color: bestColor,
-                isBruiseZone: isBruise
+                isBruiseZone: isBruise,
+                healingRate: bestHealingRate
             };
         }
 

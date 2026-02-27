@@ -50,7 +50,7 @@ let Delaunator = null;
 
 // Default zone weight — defensive fallback for null/undefined entries
 const DEFAULT_WEIGHT = Object.freeze({
-    zone: 'none', weight: 0, color: [0.15, 0.15, 0.15], isBruiseZone: false
+    zone: 'none', weight: 0, color: [0.15, 0.15, 0.15], isBruiseZone: false, healingRate: 'moderate'
 });
 
 // Model
@@ -514,6 +514,7 @@ function subdivideMesh(landmarks, indices, uvData, weights) {
                 (c0[2] + c1[2]) / 2,
             ],
             isBruiseZone: !!(w0.isBruiseZone || w1.isBruiseZone),
+            healingRate: (w0.weight || 0) >= (w1.weight || 0) ? (w0.healingRate || 'moderate') : (w1.healingRate || 'moderate'),
         });
 
         edgeMap.set(key, idx);
@@ -1358,10 +1359,11 @@ function buildFaceMesh(day) {
     const colors = new Float32Array(N * 3);
     const uvs = hasTexture ? new Float32Array(N * 2) : null;
 
-    // ── DISPLACEMENT with safety cap ──
-    const rawDisplacementM = state.nasalVolumeDelta / 1000;
+    // ── ZONE-SPECIFIC DISPLACEMENT ──
+    // Each zone has its own swelling timeline (very_slow → fast)
     const maxSafeDisplacement = faceScale * 0.05;
-    const displacementM = Math.min(rawDisplacementM, maxSafeDisplacement);
+    const zoneSwellingMap = state.zoneSwelling || {};
+    const maxDispMM = healingModel.maxDisplacementMM;
 
     const skinR = 0.85, skinG = 0.72, skinB = 0.62;
 
@@ -1398,12 +1400,20 @@ function buildFaceMesh(day) {
         const dirLen = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
         if (dirLen > 1e-8) { dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen; }
 
-        // ── SWELLING DEFORMATION ──
+        // ── ZONE-SPECIFIC SWELLING DEFORMATION ──
+        // Each zone resolves at its own rate: tip (very_slow) persists
+        // long after periorbital (fast) has fully resolved.
+        const zoneRate = zw.healingRate || 'moderate';
+        const zoneSwell = zoneSwellingMap[zoneRate] !== undefined
+            ? zoneSwellingMap[zoneRate] : (state.swellingLevel || 0);
+        const rawDisp = (zoneSwell * maxDispMM) / 1000;
+        const disp = Math.min(rawDisp, maxSafeDisplacement);
+
         const rawWeight = FaceZones.getSwellingWeight(zw);
         const swellW = rawWeight * rawWeight * (3 - 2 * rawWeight);
-        positions[i * 3]     = lm.x + dirX * displacementM * swellW;
-        positions[i * 3 + 1] = lm.y + dirY * displacementM * swellW;
-        positions[i * 3 + 2] = lm.z + dirZ * displacementM * swellW;
+        positions[i * 3]     = lm.x + dirX * disp * swellW;
+        positions[i * 3 + 1] = lm.y + dirY * disp * swellW;
+        positions[i * 3 + 2] = lm.z + dirZ * disp * swellW;
 
         // UV
         if (uvs && capturedUVs[i]) {
@@ -1438,8 +1448,8 @@ function buildFaceMesh(day) {
                 r *= dk; g *= dk; b *= dk;
             }
 
-            // Swelling redness
-            const sr = state.swellingLevel * swellW * 0.06;
+            // Swelling redness (zone-specific)
+            const sr = zoneSwell * swellW * 0.06;
             if (sr > 0.01) { r = Math.min(1, r + sr * 0.4); g -= sr * 0.1; b -= sr * 0.08; }
         } else {
             // Demo mode: skin colors
@@ -1454,7 +1464,7 @@ function buildFaceMesh(day) {
                 b = skinB * (1 - bruiseI * 0.7) + bb * bruiseI * 0.7;
                 r *= (1 - bruiseI * 0.15); g *= (1 - bruiseI * 0.15); b *= (1 - bruiseI * 0.15);
             }
-            const sr = state.swellingLevel * swellW * 0.12;
+            const sr = zoneSwell * swellW * 0.12;
             r = Math.min(1, r + sr); g = Math.max(0, g - sr * 0.3);
         }
 
@@ -1531,6 +1541,23 @@ function updateViewerUI(state) {
     else if (d < 365) dayLabel.textContent = `${Math.round(d / 30)} month${Math.round(d / 30) > 1 ? 's' : ''}`;
     else dayLabel.textContent = '12 months';
 
+    // ── Clinical milestone ──
+    const milestoneEl = document.getElementById('day-milestone');
+    if (milestoneEl) {
+        let ms = '';
+        if (d === 0) ms = 'Cast/splint in place';
+        else if (d <= 2) ms = 'Bruising developing \u2022 Cold compresses recommended';
+        else if (d < 7) ms = 'Cast period \u2022 Swelling near peak';
+        else if (d === 7) ms = 'Typical cast removal day';
+        else if (d < 14) ms = 'Early recovery \u2022 Avoid strenuous activity';
+        else if (d < 30) ms = 'Return to normal activities \u2022 Sutures removed';
+        else if (d < 90) ms = 'Shape becoming clearer \u2022 Tip still refining';
+        else if (d < 180) ms = 'Tip refinement ongoing \u2022 Patience required';
+        else if (d < 365) ms = 'Subtle changes continuing';
+        else ms = 'Final result';
+        milestoneEl.textContent = ms;
+    }
+
     swellPct.textContent = `${Math.round(state.swellingLevel * 100)}%`;
     swellPct.className = 'stat-value ' + (
         state.swellingLevel > 0.6 ? 'high' : state.swellingLevel > 0.3 ? 'med' :
@@ -1558,6 +1585,8 @@ function updateProfile() {
         skinThickness: document.getElementById('opt-skin').value,
         initialIntensity: document.getElementById('opt-intensity').value,
         bruisingPresent: document.getElementById('opt-bruising').checked,
+        osteotomy: document.getElementById('opt-osteotomy').checked,
+        approach: document.getElementById('opt-approach').value,
     });
     buildFaceMesh(currentDay);
 }
@@ -1617,6 +1646,8 @@ function init() {
     document.getElementById('opt-skin').addEventListener('change', updateProfile);
     document.getElementById('opt-intensity').addEventListener('change', updateProfile);
     document.getElementById('opt-bruising').addEventListener('change', updateProfile);
+    document.getElementById('opt-approach').addEventListener('change', updateProfile);
+    document.getElementById('opt-osteotomy').addEventListener('change', updateProfile);
 
     document.getElementById('zone-toggle').addEventListener('change', (e) => {
         showZones = e.target.checked;

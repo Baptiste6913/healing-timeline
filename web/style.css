@@ -344,6 +344,13 @@ body {
     font-size: 26px;
     font-weight: 700;
 }
+.day-milestone {
+    font-size: 12px;
+    color: var(--text2);
+    margin-top: 2px;
+    font-weight: 400;
+    line-height: 1.4;
+}
 
 .viewer-canvas {
     flex: 1;
