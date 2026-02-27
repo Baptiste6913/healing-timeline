@@ -3,6 +3,9 @@
  *
  * ES Module. Imports Three.js and MediaPipe from CDN.
  * Uses FaceZones and HealingModelJS from global scope (loaded via script tags).
+ *
+ * KEY FEATURE: Captures camera frame as texture and maps it onto the 3D face mesh
+ * so the user sees their actual face in 3D, with healing simulation overlaid.
  */
 
 import * as THREE from 'three';
@@ -26,6 +29,10 @@ let faceMesh = null;
 let baseLandmarks = null;  // original positions for deformation
 let faceNormals = null;
 let triangleIndices = null;
+
+// Face texture from camera
+let capturedTexture = null;   // THREE.CanvasTexture from camera frame
+let capturedUVs = null;       // Original 2D landmark positions for UV mapping
 
 // Model
 let healingModel = new HealingModelJS.HealingModel();
@@ -293,9 +300,38 @@ function updateTrackingUI(detected) {
 function captureFace() {
     if (!capturedLandmarks) return;
 
+    // ─── Capture video frame as texture BEFORE stopping the camera ───
+    const video = document.getElementById('camera-video');
+    const texCanvas = document.createElement('canvas');
+    texCanvas.width = video.videoWidth || 640;
+    texCanvas.height = video.videoHeight || 480;
+    const texCtx = texCanvas.getContext('2d');
+
+    // Draw the video frame (mirrored to match what user sees)
+    texCtx.translate(texCanvas.width, 0);
+    texCtx.scale(-1, 1);
+    texCtx.drawImage(video, 0, 0, texCanvas.width, texCanvas.height);
+
+    // Create Three.js texture from captured frame
+    capturedTexture = new THREE.CanvasTexture(texCanvas);
+    capturedTexture.colorSpace = THREE.SRGBColorSpace;
+    capturedTexture.minFilter = THREE.LinearFilter;
+    capturedTexture.magFilter = THREE.LinearFilter;
+    capturedTexture.generateMipmaps = false;
+
+    // Store original 2D positions as UV coordinates
+    // Since we mirrored the texture, u = 1 - lm.x to match
+    capturedUVs = capturedLandmarks.map(lm => ({
+        u: 1.0 - lm.x,   // mirror x to match mirrored texture
+        v: 1.0 - lm.y     // flip y (Three.js v goes bottom-to-top)
+    }));
+
+    console.log(`[Capture] Video frame captured: ${texCanvas.width}x${texCanvas.height}, UVs computed for ${capturedUVs.length} landmarks`);
+
     // Stop camera
     if (videoStream) {
         videoStream.getTracks().forEach(t => t.stop());
+        videoStream = null;
     }
 
     showScreen('processing');
@@ -314,8 +350,7 @@ function captureFace() {
         // Compute normals
         faceNormals = computeNormals(baseLandmarks);
 
-        // CRITICAL: Show viewer screen FIRST so the container has layout dimensions
-        // (otherwise clientWidth/clientHeight are 0 and the canvas is invisible)
+        // Show viewer FIRST so the container has layout dimensions
         showScreen('viewer');
 
         // Wait for the browser to compute layout, then init 3D
@@ -333,6 +368,10 @@ function captureFace() {
  * Use sample/generated face for demo mode (no camera needed).
  */
 function useSampleFace() {
+    // No texture in demo mode
+    capturedTexture = null;
+    capturedUVs = null;
+
     showScreen('processing');
 
     setTimeout(() => {
@@ -409,15 +448,11 @@ function generateSampleFaceLandmarks() {
 function buildFallbackTriangulation(landmarks) {
     if (!landmarks || landmarks.length < 3) return null;
 
-    const n = landmarks.length;
     const indices = [];
-
-    // Sort landmarks by x,y into a grid and connect nearby points
     const sorted = landmarks.map((lm, i) => ({ x: lm.x, y: lm.y, z: lm.z, idx: i }));
     sorted.sort((a, b) => a.y - b.y || a.x - b.x);
 
-    // Build a spatial hash for nearest-neighbor lookup
-    const cellSize = 0.008; // ~8mm cells
+    const cellSize = 0.008;
     const grid = new Map();
 
     for (const pt of sorted) {
@@ -428,7 +463,6 @@ function buildFallbackTriangulation(landmarks) {
         grid.get(key).push(pt);
     }
 
-    // For each point, find nearby points and form triangles
     const seen = new Set();
     for (const pt of sorted) {
         const gx = Math.floor(pt.x / cellSize);
@@ -447,21 +481,18 @@ function buildFallbackTriangulation(landmarks) {
             }
         }
 
-        // Sort neighbors by distance
         neighbors.sort((a, b) => {
             const da = (a.x - pt.x) ** 2 + (a.y - pt.y) ** 2;
             const db = (b.x - pt.x) ** 2 + (b.y - pt.y) ** 2;
             return da - db;
         });
 
-        // Take closest neighbors and form triangles
         const closest = neighbors.slice(0, 8);
         for (let i = 0; i < closest.length; i++) {
             for (let j = i + 1; j < closest.length; j++) {
                 const tri = [pt.idx, closest[i].idx, closest[j].idx].sort((a, b) => a - b);
                 const key = `${tri[0]},${tri[1]},${tri[2]}`;
                 if (!seen.has(key)) {
-                    // Check that the triangle is not too degenerate (thin)
                     const p0 = landmarks[tri[0]], p1 = landmarks[tri[1]], p2 = landmarks[tri[2]];
                     const e1x = p1.x - p0.x, e1y = p1.y - p0.y;
                     const e2x = p2.x - p0.x, e2y = p2.y - p0.y;
@@ -471,7 +502,6 @@ function buildFallbackTriangulation(landmarks) {
                         Math.sqrt(e2x * e2x + e2y * e2y),
                         Math.sqrt((p2.x-p1.x)**2 + (p2.y-p1.y)**2)
                     );
-                    // Skip degenerate or too-large triangles
                     if (area > 1e-8 && maxEdge < cellSize * 3) {
                         seen.add(key);
                         indices.push(tri[0], tri[1], tri[2]);
@@ -501,11 +531,9 @@ function computeNormals(landmarks) {
 
             const v0 = landmarks[i0], v1 = landmarks[i1], v2 = landmarks[i2];
 
-            // edge vectors
             const e1x = v1.x - v0.x, e1y = v1.y - v0.y, e1z = v1.z - v0.z;
             const e2x = v2.x - v0.x, e2y = v2.y - v0.y, e2z = v2.z - v0.z;
 
-            // cross product
             const nx = e1y * e2z - e1z * e2y;
             const ny = e1z * e2x - e1x * e2z;
             const nz = e1x * e2y - e1y * e2x;
@@ -515,14 +543,12 @@ function computeNormals(landmarks) {
             normals[i2].x += nx; normals[i2].y += ny; normals[i2].z += nz;
         }
 
-        // Normalize
         for (const n of normals) {
             const len = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
             if (len > 1e-8) { n.x /= len; n.y /= len; n.z /= len; }
             else { n.x = 0; n.y = 0; n.z = 1; }
         }
     } else {
-        // Fallback: approximate normals pointing outward from centroid
         let cx = 0, cy = 0, cz = 0;
         for (const lm of landmarks) { cx += lm.x; cy += lm.y; cz += lm.z; }
         cx /= landmarks.length; cy /= landmarks.length; cz /= landmarks.length;
@@ -544,16 +570,16 @@ function computeNormals(landmarks) {
 
 function initViewer() {
     const container = document.getElementById('viewer-canvas');
-    // Clear previous
     while (container.firstChild) container.removeChild(container.firstChild);
 
-    // Fallback dimensions if container hasn't laid out yet
     const w = container.clientWidth || window.innerWidth - 24;
     const h = container.clientHeight || Math.round(window.innerHeight * 0.45);
 
     console.log(`[Viewer] Init canvas: ${w}x${h}`);
 
     scene = new THREE.Scene();
+
+    // Gradient background
     scene.background = new THREE.Color(0x1a1a2e);
 
     // Camera
@@ -565,7 +591,7 @@ function initViewer() {
     renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.4;
+    renderer.toneMappingExposure = 1.2;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
 
@@ -578,25 +604,30 @@ function initViewer() {
     controls.maxDistance = 2;
     controls.enablePan = true;
 
-    // Lights — stronger and more balanced for skin rendering
-    const keyLight = new THREE.DirectionalLight(0xfff5ee, 3.0);
-    keyLight.position.set(0.3, 0.5, 1);
+    // Lighting — optimized for face texture rendering
+    // Key light (main illumination from front-right)
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.0);
+    keyLight.position.set(0.3, 0.4, 1);
     scene.add(keyLight);
 
-    const fillLight = new THREE.DirectionalLight(0xc8d8ff, 1.2);
-    fillLight.position.set(-0.5, 0.2, 0.8);
+    // Fill light (softer, from front-left, to reduce shadows)
+    const fillLight = new THREE.DirectionalLight(0xe8e8ff, 1.0);
+    fillLight.position.set(-0.4, 0.2, 0.8);
     scene.add(fillLight);
 
-    const rimLight = new THREE.DirectionalLight(0xffddcc, 0.8);
-    rimLight.position.set(0, -0.3, -0.5);
-    scene.add(rimLight);
-
-    const topLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    // Top light (subtle overhead)
+    const topLight = new THREE.DirectionalLight(0xffffff, 0.5);
     topLight.position.set(0, 1, 0.3);
     scene.add(topLight);
 
-    scene.add(new THREE.AmbientLight(0x555566, 1.0));
-    scene.add(new THREE.HemisphereLight(0xffeedd, 0x333344, 0.8));
+    // Rim light from behind (subtle edge definition)
+    const rimLight = new THREE.DirectionalLight(0xffddcc, 0.3);
+    rimLight.position.set(0, -0.2, -0.5);
+    scene.add(rimLight);
+
+    // Strong ambient + hemisphere for even base illumination
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    scene.add(new THREE.HemisphereLight(0xffeedd, 0x444466, 0.5));
 
     // Resize handler
     const resizeViewer = () => {
@@ -610,7 +641,6 @@ function initViewer() {
     };
     window.addEventListener('resize', resizeViewer);
 
-    // Also use ResizeObserver for when the container becomes visible
     if (typeof ResizeObserver !== 'undefined') {
         const ro = new ResizeObserver(() => resizeViewer());
         ro.observe(container);
@@ -651,24 +681,26 @@ function autoCenterCamera() {
     const sizeY = maxY - minY;
     const maxSize = Math.max(sizeX, sizeY);
 
-    // Position camera to see the full face with some margin
     const fovRad = threeCamera.fov * (Math.PI / 180);
-    const distance = (maxSize / 2) / Math.tan(fovRad / 2) * 1.6;
+    const distance = (maxSize / 2) / Math.tan(fovRad / 2) * 1.5;
 
     threeCamera.position.set(cx, cy, cz + Math.max(distance, 0.15));
     controls.target.set(cx, cy, cz);
     controls.update();
 
-    console.log(`[Camera] Auto-centered on mesh — center: (${cx.toFixed(4)}, ${cy.toFixed(4)}, ${cz.toFixed(4)}), dist: ${distance.toFixed(4)}, face size: ${maxSize.toFixed(4)}`);
+    console.log(`[Camera] Auto-centered — center: (${cx.toFixed(4)}, ${cy.toFixed(4)}, ${cz.toFixed(4)}), dist: ${distance.toFixed(4)}`);
 }
 
 /**
  * Build or update the 3D face mesh with healing deformation applied.
+ * If a camera texture was captured, it is UV-mapped onto the mesh.
+ * Healing effects (bruising, swelling) are blended via vertex colors.
  */
 function buildFaceMesh(day) {
     if (!baseLandmarks || !zoneWeights) return;
 
     const state = healingModel.evaluate(day);
+    const hasTexture = capturedTexture && capturedUVs;
 
     // Remove previous mesh
     if (faceMesh) {
@@ -685,10 +717,11 @@ function buildFaceMesh(day) {
     const positions = new Float32Array(baseLandmarks.length * 3);
     const normals3 = new Float32Array(baseLandmarks.length * 3);
     const colors = new Float32Array(baseLandmarks.length * 3);
+    const uvs = new Float32Array(baseLandmarks.length * 2);
 
     const displacementM = state.nasalVolumeDelta / 1000; // mm -> meters
 
-    // Skin base color
+    // Skin base color (used when no texture or in demo mode)
     const skinR = 0.85, skinG = 0.72, skinB = 0.62;
 
     for (let i = 0; i < baseLandmarks.length; i++) {
@@ -696,7 +729,7 @@ function buildFaceMesh(day) {
         const n = faceNormals[i];
         const zw = zoneWeights[i];
 
-        // Swelling deformation
+        // ── Swelling deformation ──
         const swellW = FaceZones.getSwellingWeight(zw);
         const dx = n.x * displacementM * swellW;
         const dy = n.y * displacementM * swellW;
@@ -710,18 +743,53 @@ function buildFaceMesh(day) {
         normals3[i * 3 + 1] = n.y;
         normals3[i * 3 + 2] = n.z;
 
-        // Vertex color: skin + bruise blend + zone visualization
-        let r = skinR, g = skinG, b = skinB;
+        // ── UV coordinates (from original 2D landmark positions) ──
+        if (capturedUVs) {
+            uvs[i * 2]     = capturedUVs[i].u;
+            uvs[i * 2 + 1] = capturedUVs[i].v;
+        }
+
+        // ── Vertex colors ──
+        // When we have a texture, vertex colors act as a MULTIPLIER on the texture.
+        // White (1,1,1) = show texture as-is. Tinted = overlay healing effects.
+        let r, g, b;
 
         if (showZones) {
-            // Zone visualization mode: color by zone
+            // Zone visualization mode: color by zone (overrides texture)
             const [zr, zg, zb] = zw.color || [0.15, 0.15, 0.15];
             const mix = Math.max(0.2, zw.weight);
             r = skinR * (1 - mix) + zr * mix;
             g = skinG * (1 - mix) + zg * mix;
             b = skinB * (1 - mix) + zb * mix;
+        } else if (hasTexture) {
+            // ── TEXTURE MODE: start white, apply healing tints ──
+            r = 1.0; g = 1.0; b = 1.0;
+
+            // Bruise overlay: tint vertex colors toward bruise color
+            const bruiseW = FaceZones.getBruisingWeight(zw);
+            const bruiseIntensity = state.bruisingLevel * bruiseW;
+            if (bruiseIntensity > 0.01) {
+                const [br, bg, bb] = state.bruiseColor;
+                const strength = bruiseIntensity * 0.65;
+                r = r * (1 - strength) + br * strength;
+                g = g * (1 - strength) + bg * strength;
+                b = b * (1 - strength) + bb * strength;
+                // Darken bruised areas
+                const darken = 1.0 - bruiseIntensity * 0.2;
+                r *= darken; g *= darken; b *= darken;
+            }
+
+            // Swelling redness (mild flushing)
+            const swellRedness = state.swellingLevel * swellW * 0.08;
+            if (swellRedness > 0.01) {
+                r = Math.min(1, r + swellRedness * 0.5);
+                g = Math.max(0, g - swellRedness * 0.15);
+                b = Math.max(0, b - swellRedness * 0.1);
+            }
         } else {
-            // Bruise color blending
+            // ── NO TEXTURE (demo mode): use skin vertex colors ──
+            r = skinR; g = skinG; b = skinB;
+
             const bruiseW = FaceZones.getBruisingWeight(zw);
             const bruiseIntensity = state.bruisingLevel * bruiseW;
             if (bruiseIntensity > 0.01) {
@@ -729,12 +797,10 @@ function buildFaceMesh(day) {
                 r = skinR * (1 - bruiseIntensity * 0.7) + br * bruiseIntensity * 0.7;
                 g = skinG * (1 - bruiseIntensity * 0.7) + bg * bruiseIntensity * 0.7;
                 b = skinB * (1 - bruiseIntensity * 0.7) + bb * bruiseIntensity * 0.7;
-                // Darken in bruised area
                 const darken = 1.0 - bruiseIntensity * 0.15;
                 r *= darken; g *= darken; b *= darken;
             }
 
-            // Swelling redness (mild flushing in swollen areas)
             const swellRedness = state.swellingLevel * swellW * 0.12;
             r = Math.min(1, r + swellRedness);
             g = Math.max(0, g - swellRedness * 0.3);
@@ -745,62 +811,59 @@ function buildFaceMesh(day) {
         colors[i * 3 + 2] = b;
     }
 
-    // Build geometry
+    // ── Build geometry ──
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals3, 3));
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
+    if (capturedUVs) {
+        geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    }
+
     const hasTriangles = triangleIndices && triangleIndices.length > 0;
 
+    // Determine which triangle indices to use
+    let activeIndices = null;
     if (hasTriangles) {
-        // Solid mesh with triangles
-        geometry.setIndex(new THREE.BufferAttribute(triangleIndices, 1));
-        geometry.computeVertexNormals(); // Recompute normals from triangles for correct lighting
+        activeIndices = triangleIndices;
+    } else {
+        const fallbackIndices = buildFallbackTriangulation(baseLandmarks);
+        if (fallbackIndices && fallbackIndices.length > 0) {
+            activeIndices = new Uint32Array(fallbackIndices);
+        }
+    }
+
+    if (activeIndices && activeIndices.length > 0) {
+        geometry.setIndex(new THREE.BufferAttribute(activeIndices, 1));
+        geometry.computeVertexNormals();
+
+        // Material: texture + vertex colors (vertex colors multiply with texture)
+        const useTextureInMaterial = hasTexture && !showZones;
 
         const material = new THREE.MeshStandardMaterial({
+            map: useTextureInMaterial ? capturedTexture : null,
             vertexColors: true,
-            roughness: 0.55,
-            metalness: 0.02,
+            roughness: 0.6,
+            metalness: 0.0,
             side: THREE.DoubleSide,
-            flatShading: false,
-            envMapIntensity: 0.3,
+            flatShading: !hasTriangles, // flat shading only for fallback triangulation
         });
 
         faceMesh = new THREE.Mesh(geometry, material);
         faceMesh.name = 'faceMesh';
         scene.add(faceMesh);
-        console.log(`[Mesh] Built solid mesh with ${triangleIndices.length / 3} triangles`);
-    } else {
-        // No triangles available — try to build a simple triangulation from 2D projection
-        console.warn('[Mesh] No triangle indices available, building fallback triangulation...');
-        const fallbackIndices = buildFallbackTriangulation(baseLandmarks);
-        if (fallbackIndices && fallbackIndices.length > 0) {
-            geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(fallbackIndices), 1));
-            geometry.computeVertexNormals();
 
-            const material = new THREE.MeshStandardMaterial({
-                vertexColors: true,
-                roughness: 0.55,
-                metalness: 0.02,
-                side: THREE.DoubleSide,
-                flatShading: true,
-            });
-
-            faceMesh = new THREE.Mesh(geometry, material);
-            faceMesh.name = 'faceMesh';
-            scene.add(faceMesh);
-            console.log(`[Mesh] Built fallback mesh with ${fallbackIndices.length / 3} triangles`);
-        }
+        console.log(`[Mesh] Built ${useTextureInMaterial ? 'textured' : 'colored'} mesh with ${activeIndices.length / 3} triangles`);
     }
 
-    // Always add point cloud — larger size when no mesh
+    // Always add point cloud (visible through mesh edges or standalone)
     const pointGeometry = new THREE.BufferGeometry();
     pointGeometry.setAttribute('position', new THREE.BufferAttribute(positions.slice(), 3));
     pointGeometry.setAttribute('color', new THREE.BufferAttribute(colors.slice(), 3));
 
     const pointMaterial = new THREE.PointsMaterial({
-        size: hasTriangles ? 0.0015 : 0.005,
+        size: activeIndices ? 0.001 : 0.004,
         vertexColors: true,
         sizeAttenuation: true,
     });
@@ -924,6 +987,12 @@ function init() {
         // cleanup
         if (faceMesh) { scene.remove(faceMesh); }
         baseLandmarks = null;
+        // Dispose texture
+        if (capturedTexture) {
+            capturedTexture.dispose();
+            capturedTexture = null;
+        }
+        capturedUVs = null;
     });
 
     // Timeline slider
