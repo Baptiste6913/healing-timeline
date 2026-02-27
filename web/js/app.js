@@ -45,6 +45,9 @@ let capturedUVs = null;
 // Face scale (calibrated, used for displacement capping)
 let faceScale = 0.14;
 
+// Delaunay triangulation library (loaded async from CDN)
+let Delaunator = null;
+
 // Model
 let healingModel = new HealingModelJS.HealingModel();
 let currentDay = 0;
@@ -60,6 +63,9 @@ let showZones = false;
 async function initMediaPipe() {
     const statusEl = document.getElementById('loading-status');
     statusEl.textContent = 'Loading face detection model...';
+
+    // Load Delaunator in parallel for robust triangulation
+    loadDelaunator();
 
     try {
         const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs');
@@ -593,6 +599,113 @@ function smoothMesh(landmarks, indices, iterations = 2, factor = 0.3) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// DELAUNAY TRIANGULATION — Robust mesh from 2D landmark positions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Load Delaunator library for 2D Delaunay triangulation.
+ * This produces clean, non-overlapping triangles with consistent winding.
+ */
+async function loadDelaunator() {
+    if (Delaunator) return true;
+    try {
+        const mod = await import('https://cdn.jsdelivr.net/npm/delaunator@5.0.1/+esm');
+        Delaunator = mod.default;
+        console.log('[Delaunator] Loaded successfully');
+        return true;
+    } catch (e) {
+        console.warn('[Delaunator] CDN load failed:', e);
+        return false;
+    }
+}
+
+/**
+ * Build clean triangulation from 2D landmark positions using Delaunay.
+ *
+ * Why Delaunay instead of MediaPipe tessellation edges?
+ * - MediaPipe's FACE_LANDMARKS_TESSELATION edges require reconstructing
+ *   triangles via 3-clique detection, which produces inconsistent winding
+ *   (some CW, some CCW), leading to random normals and spiky displacement.
+ * - Delaunay triangulation on 2D positions guarantees:
+ *   1. No overlapping triangles
+ *   2. Consistent CCW winding
+ *   3. Well-shaped triangles (maximizes minimum angle)
+ *   4. Correct normals for smooth deformation
+ *
+ * Boundary triangles (convex hull artifacts connecting ears/chin) are
+ * filtered by edge length relative to median.
+ */
+function buildTrianglesDelaunay(landmarks2D) {
+    if (!Delaunator) return null;
+
+    const N = landmarks2D.length;
+    const coords = new Float64Array(N * 2);
+    for (let i = 0; i < N; i++) {
+        coords[i * 2] = landmarks2D[i].x;
+        coords[i * 2 + 1] = landmarks2D[i].y;
+    }
+
+    const d = new Delaunator(coords);
+    const tris = d.triangles;
+
+    // Compute median edge length for adaptive boundary filtering
+    const edgeLens = [];
+    for (let i = 0; i < tris.length; i += 3) {
+        const a = tris[i], b = tris[i + 1], c = tris[i + 2];
+        edgeLens.push(
+            Math.hypot(coords[b * 2] - coords[a * 2], coords[b * 2 + 1] - coords[a * 2 + 1]),
+            Math.hypot(coords[c * 2] - coords[b * 2], coords[c * 2 + 1] - coords[b * 2 + 1]),
+            Math.hypot(coords[a * 2] - coords[c * 2], coords[a * 2 + 1] - coords[c * 2 + 1])
+        );
+    }
+    edgeLens.sort((a, b) => a - b);
+    const medianEdge = edgeLens[Math.floor(edgeLens.length / 2)];
+    const maxEdge = medianEdge * 3.0;
+
+    // Filter out long boundary triangles (convex hull artifacts)
+    const filtered = [];
+    for (let i = 0; i < tris.length; i += 3) {
+        const a = tris[i], b = tris[i + 1], c = tris[i + 2];
+        const e1 = Math.hypot(coords[b * 2] - coords[a * 2], coords[b * 2 + 1] - coords[a * 2 + 1]);
+        const e2 = Math.hypot(coords[c * 2] - coords[b * 2], coords[c * 2 + 1] - coords[b * 2 + 1]);
+        const e3 = Math.hypot(coords[a * 2] - coords[c * 2], coords[a * 2 + 1] - coords[c * 2 + 1]);
+
+        if (e1 <= maxEdge && e2 <= maxEdge && e3 <= maxEdge) {
+            filtered.push(a, b, c);
+        }
+    }
+
+    console.log(`[Delaunay] ${tris.length / 3} raw → ${filtered.length / 3} filtered (median edge: ${medianEdge.toFixed(4)})`);
+    return new Uint32Array(filtered);
+}
+
+/**
+ * Ensure all triangles have outward-facing normals (toward +Z / viewer).
+ * After 3D calibration, the face front is toward +Z (nose protrudes in +Z).
+ * If average face normal Z is negative, flip all triangle windings.
+ */
+function ensureOutwardFacing(indices, landmarks) {
+    let sumNz = 0;
+    for (let i = 0; i < indices.length; i += 3) {
+        const a = landmarks[indices[i]], b = landmarks[indices[i + 1]], c = landmarks[indices[i + 2]];
+        if (!a || !b || !c) continue;
+        const e1x = b.x - a.x, e1y = b.y - a.y;
+        const e2x = c.x - a.x, e2y = c.y - a.y;
+        sumNz += e1x * e2y - e1y * e2x;
+    }
+
+    if (sumNz < 0) {
+        for (let i = 0; i < indices.length; i += 3) {
+            const tmp = indices[i + 1];
+            indices[i + 1] = indices[i + 2];
+            indices[i + 2] = tmp;
+        }
+        console.log('[Mesh] Flipped triangle winding → normals now face outward');
+    }
+    return indices;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CAPTURE + MESH CONSTRUCTION
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -688,44 +801,62 @@ function captureFace() {
 
     (async () => {
         try {
-            // ─── Step 1: IPD-CALIBRATED 3D COORDINATES ───
+            // ─── Step 1: DELAUNAY TRIANGULATION from 2D positions ───
+            // Build triangulation BEFORE 3D calibration (2D gives clean results)
+            updateProcessingStatus('Building mesh triangulation...');
+            await yieldToUI();
+
+            if (!Delaunator) await loadDelaunator();
+
+            if (Delaunator) {
+                triangleIndices = buildTrianglesDelaunay(avgLandmarks);
+                console.log(`[Process] Step 1/6: Delaunay → ${triangleIndices ? triangleIndices.length / 3 : 0} triangles`);
+            }
+
+            // Fallback to MediaPipe tessellation or spatial hashing
+            if (!triangleIndices || triangleIndices.length === 0) {
+                console.log('[Process] Delaunay unavailable, using fallback triangulation');
+                // Try with calibrated landmarks for fallback
+                const tempCal = calibrateLandmarksTo3D(avgLandmarks);
+                const fallback = buildFallbackTriangulation(tempCal);
+                if (fallback) triangleIndices = new Uint32Array(fallback);
+            }
+
+            // ─── Step 2: IPD-CALIBRATED 3D COORDINATES ───
             updateProcessingStatus('Calibrating 3D proportions...');
             await yieldToUI();
 
             baseLandmarks = calibrateLandmarksTo3D(avgLandmarks);
-            console.log(`[Process] Step 1/5: Calibrated ${baseLandmarks.length} landmarks`);
+            console.log(`[Process] Step 2/6: Calibrated ${baseLandmarks.length} landmarks`);
 
-            // ─── Step 2: ZONE WEIGHTS on original 468 landmarks ───
+            // ─── Step 3: FIX TRIANGLE WINDING for correct normals ───
+            if (triangleIndices && triangleIndices.length > 0) {
+                ensureOutwardFacing(triangleIndices, baseLandmarks);
+                console.log(`[Process] Step 3/6: Winding verified`);
+            }
+
+            // ─── Step 4: ZONE WEIGHTS on original 468 landmarks ───
             updateProcessingStatus('Mapping anatomical zones...');
             await yieldToUI();
 
             zoneWeights = FaceZones.computeZoneWeights(baseLandmarks);
-            console.log(`[Process] Step 2/5: Zone weights computed`);
+            console.log(`[Process] Step 4/6: Zone weights computed`);
 
-            // Ensure triangle indices exist
-            if (!triangleIndices || triangleIndices.length === 0) {
-                updateProcessingStatus('Building mesh triangulation...');
-                await yieldToUI();
-                const fallback = buildFallbackTriangulation(baseLandmarks);
-                if (fallback) triangleIndices = new Uint32Array(fallback);
-                console.log(`[Process] Fallback triangulation: ${triangleIndices ? triangleIndices.length / 3 : 0} triangles`);
-            }
-
-            // ─── Step 3: SUBDIVISION ───
+            // ─── Step 5: SUBDIVISION + SMOOTHING ───
             if (triangleIndices && triangleIndices.length > 0) {
-                updateProcessingStatus('Subdividing mesh (pass 1)...');
+                updateProcessingStatus('Subdividing mesh...');
                 await yieldToUI();
 
-                // First subdivision: ~468 → ~2000 vertices
+                // First subdivision: ~800 → ~3200 triangles
                 let sub = subdivideMesh(baseLandmarks, triangleIndices, capturedUVs, zoneWeights);
-                console.log(`[Process] Step 3a/5: Subdivision 1 → ${sub.landmarks.length} verts, ${sub.indices.length / 3} tris`);
+                console.log(`[Process] Step 5a/6: Subdivision 1 → ${sub.landmarks.length} verts`);
 
-                // Second subdivision only on desktop (too heavy for mobile)
+                // Second subdivision only on desktop
                 if (!mobile) {
-                    updateProcessingStatus('Subdividing mesh (pass 2)...');
+                    updateProcessingStatus('Refining mesh...');
                     await yieldToUI();
                     sub = subdivideMesh(sub.landmarks, sub.indices, sub.uvs, sub.weights);
-                    console.log(`[Process] Step 3b/5: Subdivision 2 → ${sub.landmarks.length} verts, ${sub.indices.length / 3} tris`);
+                    console.log(`[Process] Step 5b/6: Subdivision 2 → ${sub.landmarks.length} verts`);
                 }
 
                 baseLandmarks = sub.landmarks;
@@ -733,21 +864,24 @@ function captureFace() {
                 capturedUVs = sub.uvs;
                 zoneWeights = sub.weights;
 
-                // ─── Step 4: HC LAPLACIAN SMOOTHING ───
+                // HC Laplacian smoothing
                 updateProcessingStatus('Smoothing mesh...');
                 await yieldToUI();
 
-                const hcIterations = mobile ? 2 : 3;
-                baseLandmarks = smoothMeshHC(baseLandmarks, triangleIndices, hcIterations, 0.5, 0.65);
-                console.log(`[Process] Step 4/5: HC smoothing (${hcIterations} iterations)`);
+                const hcIter = mobile ? 2 : 3;
+                baseLandmarks = smoothMeshHC(baseLandmarks, triangleIndices, hcIter, 0.5, 0.65);
+                console.log(`[Process] Step 5c/6: HC smoothing (${hcIter} iterations)`);
+
+                // Fix winding again after smoothing (shouldn't change but safety)
+                ensureOutwardFacing(triangleIndices, baseLandmarks);
             }
 
-            // ─── Step 5: NORMALS ───
+            // ─── Step 6: NORMALS ───
             updateProcessingStatus('Finalizing 3D model...');
             await yieldToUI();
 
             faceNormals = computeNormals(baseLandmarks);
-            console.log(`[Process] Step 5/5: Done! ${baseLandmarks.length} vertices, ${triangleIndices ? triangleIndices.length / 3 : 0} triangles`);
+            console.log(`[Process] Step 6/6: Done! ${baseLandmarks.length} verts, ${triangleIndices ? triangleIndices.length / 3 : 0} tris`);
 
             // ─── Show viewer ───
             showScreen('viewer');
@@ -1137,24 +1271,45 @@ function buildFaceMesh(day) {
 
     // ── DISPLACEMENT with safety cap ──
     const rawDisplacementM = state.nasalVolumeDelta / 1000;
-    // Cap max displacement to 5% of face width to prevent vertex collapse
     const maxSafeDisplacement = faceScale * 0.05;
     const displacementM = Math.min(rawDisplacementM, maxSafeDisplacement);
 
     const skinR = 0.85, skinG = 0.72, skinB = 0.62;
+
+    // ── Compute face centroid for smooth displacement directions ──
+    // Blending vertex normals with radial outward direction prevents
+    // spiky artifacts from inconsistent/noisy per-vertex normals.
+    let fcx = 0, fcy = 0, fcz = 0;
+    for (const lm of baseLandmarks) { fcx += lm.x; fcy += lm.y; fcz += lm.z; }
+    fcx /= N; fcy /= N; fcz /= N;
 
     for (let i = 0; i < N; i++) {
         const lm = baseLandmarks[i];
         const n = faceNormals[i];
         const zw = zoneWeights[i];
 
+        // ── SMOOTH DISPLACEMENT DIRECTION ──
+        // Blend vertex normal (geometry-derived) with radial outward (centroid-derived)
+        // This produces organic, diffuse swelling instead of spiky per-vertex displacement
+        const dx = lm.x - fcx, dy = lm.y - fcy, dz = lm.z - fcz;
+        const dlen = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const outX = dlen > 1e-8 ? dx / dlen : 0;
+        const outY = dlen > 1e-8 ? dy / dlen : 0;
+        const outZ = dlen > 1e-8 ? dz / dlen : 1;
+
+        // 60% vertex normal + 40% outward direction
+        let dirX = n.x * 0.6 + outX * 0.4;
+        let dirY = n.y * 0.6 + outY * 0.4;
+        let dirZ = n.z * 0.6 + outZ * 0.4;
+        const dirLen = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+        if (dirLen > 1e-8) { dirX /= dirLen; dirY /= dirLen; dirZ /= dirLen; }
+
         // ── SWELLING DEFORMATION ──
         const rawWeight = FaceZones.getSwellingWeight(zw);
-        // SmoothStep for gradual transitions between zones (no hard edges)
         const swellW = rawWeight * rawWeight * (3 - 2 * rawWeight);
-        positions[i * 3]     = lm.x + n.x * displacementM * swellW;
-        positions[i * 3 + 1] = lm.y + n.y * displacementM * swellW;
-        positions[i * 3 + 2] = lm.z + n.z * displacementM * swellW;
+        positions[i * 3]     = lm.x + dirX * displacementM * swellW;
+        positions[i * 3 + 1] = lm.y + dirY * displacementM * swellW;
+        positions[i * 3 + 2] = lm.z + dirZ * displacementM * swellW;
 
         // UV
         if (uvs && capturedUVs[i]) {
