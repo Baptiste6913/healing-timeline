@@ -1,11 +1,15 @@
 /**
  * app.js — Main application: MediaPipe face capture + Three.js 3D viewer + timeline.
  *
- * KEY FEATURES:
- * - Captures camera frame as texture and UV-maps it onto the 3D face mesh
- * - Subdivides the 468-point MediaPipe mesh for smooth surface (~2000 vertices)
- * - Applies Laplacian smoothing for natural-looking geometry
- * - Healing simulation (swelling deformation + bruise color overlay) on top of texture
+ * ULTRA-REALISTIC 3D FACE SCAN TECHNOLOGY:
+ * - High-resolution camera capture (1920×1080)
+ * - Multi-frame landmark averaging (8 frames) for stability
+ * - IPD-calibrated 3D coordinates for accurate facial proportions
+ * - 2-level mesh subdivision (~468 → ~2000 → ~8000 vertices)
+ * - HC Laplacian smoothing (feature-preserving — keeps nose bridge & nostrils)
+ * - Capped deformation to prevent vertex collapse at high swelling
+ * - MeshPhysicalMaterial with skin-like sheen & clearcoat rendering
+ * - Environment-quality multi-directional lighting
  */
 
 import * as THREE from 'three';
@@ -23,6 +27,10 @@ let videoStream = null;
 let capturedLandmarks = null;
 let zoneWeights = null;
 
+// Multi-frame averaging for stable landmarks
+let landmarkBuffer = [];
+const FRAME_BUFFER_SIZE = 8;
+
 // Three.js
 let scene, threeCamera, renderer, controls;
 let faceMesh = null;
@@ -33,6 +41,9 @@ let triangleIndices = null;
 // Face texture from camera
 let capturedTexture = null;
 let capturedUVs = null;
+
+// Face scale (calibrated, used for displacement capping)
+let faceScale = 0.14;
 
 // Model
 let healingModel = new HealingModelJS.HealingModel();
@@ -139,14 +150,20 @@ async function startCamera() {
     }
 
     try {
+        // HIGH RESOLUTION capture for better texture quality
         videoStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+            video: { facingMode: 'user', width: { ideal: 1920 }, height: { ideal: 1080 } }
         });
         video.srcObject = videoStream;
         await video.play();
 
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
+        console.log(`[Camera] Resolution: ${video.videoWidth}×${video.videoHeight}`);
+
+        // Reset frame buffer for multi-frame averaging
+        landmarkBuffer = [];
+
         detectLoop(video, canvas, ctx);
     } catch (err) {
         console.error('[Camera]', err);
@@ -193,9 +210,14 @@ function detectLoop(video, canvas, ctx) {
             drawLandmarks(ctx, landmarks, canvas.width, canvas.height);
             updateTrackingUI(true);
             capturedLandmarks = landmarks;
+
+            // Buffer frames for multi-frame averaging (deep copy)
+            landmarkBuffer.push(landmarks.map(lm => ({ x: lm.x, y: lm.y, z: lm.z })));
+            if (landmarkBuffer.length > FRAME_BUFFER_SIZE) landmarkBuffer.shift();
         } else {
             updateTrackingUI(false);
             capturedLandmarks = null;
+            landmarkBuffer = [];  // Reset on face lost
         }
     }
 
@@ -274,13 +296,108 @@ function updateTrackingUI(detected) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// MULTI-FRAME AVERAGING + IPD CALIBRATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Average multiple frames of landmark detections for stable, noise-free positions.
+ * Reduces jitter from single-frame detection artifacts.
+ */
+function averageLandmarks(buffer) {
+    if (!buffer || buffer.length === 0) return null;
+    if (buffer.length === 1) return buffer[0].map(lm => ({ ...lm }));
+
+    const N = buffer[0].length;
+    const result = [];
+
+    for (let i = 0; i < N; i++) {
+        let sx = 0, sy = 0, sz = 0;
+        for (const frame of buffer) {
+            sx += frame[i].x;
+            sy += frame[i].y;
+            sz += frame[i].z;
+        }
+        const c = buffer.length;
+        result.push({ x: sx / c, y: sy / c, z: sz / c });
+    }
+
+    return result;
+}
+
+/**
+ * Convert normalized MediaPipe landmarks to calibrated 3D coordinates.
+ * Uses interpupillary distance (IPD) for anatomically accurate proportions.
+ *
+ * MediaPipe z-coordinate: depth relative to face center, same scale as x/y.
+ * Calibration ensures nose protrusion, head shape, and overall proportions
+ * match real-world facial geometry (~63mm IPD, ~140mm face width).
+ */
+function calibrateLandmarksTo3D(landmarks) {
+    // ── Key reference points for face geometry ──
+    const leftEyeInner = landmarks[133];   // left medial canthus
+    const rightEyeInner = landmarks[362];  // right medial canthus
+    const leftEyeOuter = landmarks[33];    // left lateral canthus
+    const rightEyeOuter = landmarks[263];  // right lateral canthus
+    const noseTip = landmarks[1];
+    const chin = landmarks[152];
+    const forehead = landmarks[10];
+
+    // ── Compute IPD (inter-pupillary distance proxy) ──
+    // Average of inner and outer eye centers for each eye
+    const leftEyeCenter = {
+        x: (leftEyeInner.x + leftEyeOuter.x) / 2,
+        y: (leftEyeInner.y + leftEyeOuter.y) / 2,
+    };
+    const rightEyeCenter = {
+        x: (rightEyeInner.x + rightEyeOuter.x) / 2,
+        y: (rightEyeInner.y + rightEyeOuter.y) / 2,
+    };
+
+    const ipdNorm = Math.sqrt(
+        (rightEyeCenter.x - leftEyeCenter.x) ** 2 +
+        (rightEyeCenter.y - leftEyeCenter.y) ** 2
+    );
+
+    // ── Face center: midpoint between eyes, vertically centered ──
+    const centerX = (leftEyeInner.x + rightEyeInner.x) / 2;
+    const centerY = (forehead.y + chin.y) / 2;
+
+    // ── Scale calibration ──
+    // Real human IPD ≈ 63mm. We model in units where 1 unit = 1m.
+    // So IPD = 0.063 in model space.
+    const targetIPD = 0.063;
+    const scale = targetIPD / Math.max(ipdNorm, 0.02);
+
+    // Store calibrated face width for displacement calculations
+    // Real face width ≈ 2.2 × IPD
+    faceScale = targetIPD * 2.2; // ~0.139
+
+    // ── Z depth calibration ──
+    // MediaPipe z is relative to face width in image space.
+    // For accurate depth, we scale z proportionally but with slight boost
+    // to preserve nose protrusion (typically 20–25mm, ~35% of IPD).
+    const zScale = scale * 1.2;
+
+    // ── Convert all landmarks ──
+    const calibrated = landmarks.map(lm => ({
+        x: (lm.x - centerX) * scale,
+        y: -(lm.y - centerY) * scale,
+        z: -lm.z * zScale
+    }));
+
+    console.log(`[Calibrate] IPD=${(ipdNorm * 1000).toFixed(1)}px norm, scale=${scale.toFixed(3)}, faceWidth=${(faceScale * 1000).toFixed(1)}mm`);
+
+    return calibrated;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MESH SUBDIVISION + SMOOTHING
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Subdivide a triangle mesh by splitting each triangle into 4.
  * Creates midpoint vertices on each edge with interpolated UVs and weights.
- * Result: ~4x triangles, ~2x vertices → much smoother surface.
+ * Result: ~4× triangles, ~2× vertices → much smoother surface.
  */
 function subdivideMesh(landmarks, indices, uvData, weights) {
     const edgeMap = new Map();
@@ -355,23 +472,100 @@ function subdivideMesh(landmarks, indices, uvData, weights) {
 }
 
 /**
- * Laplacian smoothing: moves each vertex toward the average of its neighbors.
- * Produces smoother, more natural-looking surfaces without changing topology.
+ * Build vertex adjacency map from triangle indices.
  */
-function smoothMesh(landmarks, indices, iterations = 2, factor = 0.3) {
-    // Build adjacency
+function buildAdjacency(vertexCount, indices) {
     const adj = new Map();
+    for (let i = 0; i < vertexCount; i++) adj.set(i, new Set());
+
     for (let t = 0; t < indices.length; t += 3) {
-        const verts = [indices[t], indices[t + 1], indices[t + 2]];
-        for (let i = 0; i < 3; i++) {
-            for (let j = i + 1; j < 3; j++) {
-                if (!adj.has(verts[i])) adj.set(verts[i], new Set());
-                if (!adj.has(verts[j])) adj.set(verts[j], new Set());
-                adj.get(verts[i]).add(verts[j]);
-                adj.get(verts[j]).add(verts[i]);
-            }
+        const v0 = indices[t], v1 = indices[t + 1], v2 = indices[t + 2];
+        if (v0 < vertexCount && v1 < vertexCount && v2 < vertexCount) {
+            adj.get(v0).add(v1); adj.get(v0).add(v2);
+            adj.get(v1).add(v0); adj.get(v1).add(v2);
+            adj.get(v2).add(v0); adj.get(v2).add(v1);
         }
     }
+
+    return adj;
+}
+
+/**
+ * HC Laplacian smoothing — feature-preserving smoothing algorithm.
+ *
+ * Unlike standard Laplacian which over-smooths and shrinks features (flattening
+ * the nose, filling eye sockets), HC Laplacian pulls smoothed vertices back
+ * toward their original positions, preserving sharp features and volume.
+ *
+ * @param {Array} landmarks - Vertex positions [{x,y,z}]
+ * @param {Uint32Array} indices - Triangle indices
+ * @param {number} iterations - Number of smoothing passes (2-4 recommended)
+ * @param {number} alpha - Original position weight (0-1). Higher = more preservation.
+ * @param {number} beta - Correction strength (0-1). Higher = more feature preservation.
+ */
+function smoothMeshHC(landmarks, indices, iterations = 3, alpha = 0.5, beta = 0.6) {
+    const adj = buildAdjacency(landmarks.length, indices);
+
+    let current = landmarks.map(lm => ({ ...lm }));
+    const original = landmarks;
+
+    for (let iter = 0; iter < iterations; iter++) {
+        // Step 1: Standard Laplacian smooth (move toward neighbor average)
+        const smoothed = current.map((lm, i) => {
+            const neighbors = adj.get(i);
+            if (!neighbors || neighbors.size === 0) return { ...lm };
+
+            let sx = 0, sy = 0, sz = 0;
+            for (const n of neighbors) {
+                sx += current[n].x; sy += current[n].y; sz += current[n].z;
+            }
+            const c = neighbors.size;
+            return { x: sx / c, y: sy / c, z: sz / c };
+        });
+
+        // Step 2: Compute displacement vectors (b) from weighted original
+        const bVectors = smoothed.map((lm, i) => ({
+            x: lm.x - (alpha * original[i].x + (1 - alpha) * current[i].x),
+            y: lm.y - (alpha * original[i].y + (1 - alpha) * current[i].y),
+            z: lm.z - (alpha * original[i].z + (1 - alpha) * current[i].z),
+        }));
+
+        // Step 3: HC correction — push back to preserve features
+        current = smoothed.map((lm, i) => {
+            const neighbors = adj.get(i);
+            if (!neighbors || neighbors.size === 0) {
+                return {
+                    x: lm.x - bVectors[i].x,
+                    y: lm.y - bVectors[i].y,
+                    z: lm.z - bVectors[i].z,
+                };
+            }
+
+            // Average b-vectors of neighbors
+            let nbx = 0, nby = 0, nbz = 0;
+            for (const n of neighbors) {
+                nbx += bVectors[n].x;
+                nby += bVectors[n].y;
+                nbz += bVectors[n].z;
+            }
+            const c = neighbors.size;
+
+            return {
+                x: lm.x - (beta * bVectors[i].x + (1 - beta) * (nbx / c)),
+                y: lm.y - (beta * bVectors[i].y + (1 - beta) * (nby / c)),
+                z: lm.z - (beta * bVectors[i].z + (1 - beta) * (nbz / c)),
+            };
+        });
+    }
+
+    return current;
+}
+
+/**
+ * Standard Laplacian smoothing (kept for sample/demo mesh).
+ */
+function smoothMesh(landmarks, indices, iterations = 2, factor = 0.3) {
+    const adj = buildAdjacency(landmarks.length, indices);
 
     let current = landmarks;
     for (let iter = 0; iter < iterations; iter++) {
@@ -405,29 +599,38 @@ function smoothMesh(landmarks, indices, iterations = 2, factor = 0.3) {
 function captureFace() {
     if (!capturedLandmarks) return;
 
-    // ─── Capture video frame as texture BEFORE stopping camera ───
+    // ─── 1. CAPTURE HIGH-RES VIDEO FRAME AS TEXTURE ───
     const video = document.getElementById('camera-video');
     const texCanvas = document.createElement('canvas');
-    texCanvas.width = video.videoWidth || 640;
-    texCanvas.height = video.videoHeight || 480;
+    texCanvas.width = video.videoWidth || 1280;
+    texCanvas.height = video.videoHeight || 720;
     const texCtx = texCanvas.getContext('2d');
-
-    // Draw raw video frame (no mirror — UV mapping handles coordinates directly)
     texCtx.drawImage(video, 0, 0, texCanvas.width, texCanvas.height);
 
     capturedTexture = new THREE.CanvasTexture(texCanvas);
     capturedTexture.colorSpace = THREE.SRGBColorSpace;
-    capturedTexture.minFilter = THREE.LinearFilter;
+    capturedTexture.minFilter = THREE.LinearMipmapLinearFilter;
     capturedTexture.magFilter = THREE.LinearFilter;
-    capturedTexture.generateMipmaps = false;
+    capturedTexture.anisotropy = 4;  // Better texture quality at angles
+    capturedTexture.generateMipmaps = true;
 
-    // UV coordinates = original 2D landmark positions (direct mapping to raw frame)
-    capturedUVs = capturedLandmarks.map(lm => ({
+    console.log(`[Capture] Texture: ${texCanvas.width}×${texCanvas.height}`);
+
+    // ─── 2. MULTI-FRAME AVERAGING for stable landmarks ───
+    let avgLandmarks;
+    if (landmarkBuffer.length >= 3) {
+        avgLandmarks = averageLandmarks(landmarkBuffer);
+        console.log(`[Capture] Averaged ${landmarkBuffer.length} frames for stability`);
+    } else {
+        avgLandmarks = capturedLandmarks.map(lm => ({ x: lm.x, y: lm.y, z: lm.z }));
+        console.log(`[Capture] Single frame (only ${landmarkBuffer.length} buffered)`);
+    }
+
+    // ─── 3. UV COORDINATES from averaged 2D positions ───
+    capturedUVs = avgLandmarks.map(lm => ({
         u: lm.x,           // direct x mapping to texture
         v: 1.0 - lm.y      // flip y (Three.js v goes bottom-to-top)
     }));
-
-    console.log(`[Capture] Frame: ${texCanvas.width}x${texCanvas.height}, UVs: ${capturedUVs.length}`);
 
     // Stop camera
     if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
@@ -435,36 +638,40 @@ function captureFace() {
     showScreen('processing');
 
     setTimeout(() => {
-        // Convert landmarks to 3D coordinates
-        baseLandmarks = capturedLandmarks.map(lm => ({
-            x: (lm.x - 0.5) * 0.2,
-            y: -(lm.y - 0.5) * 0.2,
-            z: -lm.z * 0.3        // increased depth scale for better 3D relief
-        }));
+        // ─── 4. IPD-CALIBRATED 3D COORDINATES ───
+        baseLandmarks = calibrateLandmarksTo3D(avgLandmarks);
 
-        // Compute zone weights on original 468 landmarks
+        // ─── 5. COMPUTE ZONE WEIGHTS on original 468 landmarks ───
         zoneWeights = FaceZones.computeZoneWeights(baseLandmarks);
 
-        // Ensure we have triangle indices (tessellation or fallback)
+        // Ensure we have triangle indices
         if (!triangleIndices || triangleIndices.length === 0) {
             const fallback = buildFallbackTriangulation(baseLandmarks);
             if (fallback) triangleIndices = new Uint32Array(fallback);
         }
 
-        // ─── SUBDIVIDE for smoother mesh ───
+        // ─── 6. TWO-LEVEL SUBDIVISION for ultra-smooth mesh ───
         if (triangleIndices && triangleIndices.length > 0) {
-            const sub = subdivideMesh(baseLandmarks, triangleIndices, capturedUVs, zoneWeights);
+            // First subdivision: ~468 → ~2000 vertices
+            let sub = subdivideMesh(baseLandmarks, triangleIndices, capturedUVs, zoneWeights);
+
+            // Second subdivision: ~2000 → ~8000 vertices
+            sub = subdivideMesh(sub.landmarks, sub.indices, sub.uvs, sub.weights);
+
             baseLandmarks = sub.landmarks;
             triangleIndices = sub.indices;
             capturedUVs = sub.uvs;
             zoneWeights = sub.weights;
 
-            // Laplacian smoothing for natural surface
-            baseLandmarks = smoothMesh(baseLandmarks, triangleIndices, 2, 0.25);
+            // ─── 7. HC LAPLACIAN SMOOTHING (feature-preserving) ───
+            // Unlike standard Laplacian, this preserves nose bridge, nostrils, eye sockets
+            baseLandmarks = smoothMeshHC(baseLandmarks, triangleIndices, 3, 0.5, 0.65);
         }
 
-        // Compute normals on subdivided + smoothed mesh
+        // ─── 8. COMPUTE NORMALS on final mesh ───
         faceNormals = computeNormals(baseLandmarks);
+
+        console.log(`[Mesh] Final: ${baseLandmarks.length} vertices, ${triangleIndices.length / 3} triangles`);
 
         // Show viewer, then init 3D
         showScreen('viewer');
@@ -488,19 +695,35 @@ function useSampleFace() {
         baseLandmarks = generateSampleFaceLandmarks();
         zoneWeights = FaceZones.computeZoneWeights(baseLandmarks);
 
-        // Ensure triangles
-        if (!triangleIndices || triangleIndices.length === 0) {
-            const fallback = buildFallbackTriangulation(baseLandmarks);
-            if (fallback) triangleIndices = new Uint32Array(fallback);
+        // Build grid-based triangulation directly from the sample grid structure.
+        // The sample face is a 22-column grid, so we create 2 triangles per cell.
+        const GRID_COLS = 22;
+        const gridRows = Math.ceil(468 / GRID_COLS);
+        const gridTris = [];
+        for (let row = 0; row < gridRows - 1; row++) {
+            for (let col = 0; col < GRID_COLS - 1; col++) {
+                const tl = row * GRID_COLS + col;
+                const tr = tl + 1;
+                const bl = (row + 1) * GRID_COLS + col;
+                const br = bl + 1;
+                if (tl < 468 && tr < 468 && bl < 468 && br < 468) {
+                    gridTris.push(tl, bl, tr);   // lower-left triangle
+                    gridTris.push(tr, bl, br);   // upper-right triangle
+                }
+            }
         }
+        triangleIndices = new Uint32Array(gridTris);
+        console.log(`[Sample] Grid triangulation: ${gridTris.length / 3} triangles`);
 
-        // Subdivide
+        // Single-level subdivision + smoothing for demo mesh
         if (triangleIndices && triangleIndices.length > 0) {
-            const sub = subdivideMesh(baseLandmarks, triangleIndices, null, zoneWeights);
+            let sub = subdivideMesh(baseLandmarks, triangleIndices, null, zoneWeights);
             baseLandmarks = sub.landmarks;
             triangleIndices = sub.indices;
             zoneWeights = sub.weights;
-            baseLandmarks = smoothMesh(baseLandmarks, triangleIndices, 2, 0.25);
+
+            // Moderate smoothing for clean organic surface
+            baseLandmarks = smoothMesh(baseLandmarks, triangleIndices, 4, 0.35);
         }
 
         faceNormals = computeNormals(baseLandmarks);
@@ -517,40 +740,77 @@ function useSampleFace() {
 }
 
 function generateSampleFaceLandmarks() {
+    const N = 468;
     const points = [];
-    for (let i = 0; i < 468; i++) {
-        const t = i / 467;
-        const angle = t * Math.PI * 15.7;
-        const r = Math.sqrt(t) * 0.08;
 
-        let x = r * Math.cos(angle);
-        let y = r * Math.sin(angle) * 1.3 - 0.01;
-        let z = 0.02 * Math.cos(t * Math.PI);
+    // Generate face-shaped point cloud using grid distribution on an ellipsoid.
+    // This produces evenly-spaced vertices that triangulate cleanly.
+    const cols = 22;
+    const rows = Math.ceil(N / cols); // ~22
 
-        if (FaceZones.ALL_NOSE_LANDMARKS.has(i)) {
-            z += 0.02;
-            if (i === 1 || i === 2 || i === 4) { z += 0.015; y -= 0.005; }
+    for (let idx = 0; idx < N; idx++) {
+        const row = Math.floor(idx / cols);
+        const col = idx % cols;
+
+        // UV coordinates: map to face surface (-1..1)
+        const u = (col / (cols - 1)) * 2 - 1;  // horizontal
+        const v = (row / (rows - 1)) * 2 - 1;  // vertical (top to bottom)
+
+        // Elliptical face mask — clamp points to face boundary
+        const faceU = u * 0.85;
+        const faceV = v;
+        const faceDist = Math.sqrt(faceU * faceU + faceV * faceV);
+        const clampedU = faceDist > 1.0 ? u * (1.0 / faceDist) : u;
+        const clampedV = faceDist > 1.0 ? v * (1.0 / faceDist) : v;
+
+        // Face dimensions (in model units, roughly matching calibrated size)
+        const x = clampedU * 0.065;
+        const y = -clampedV * 0.085;  // flip Y
+
+        // Z: spherical face curvature + nose protrusion
+        const r2 = (clampedU * 0.7) ** 2 + clampedV ** 2;
+        let z = 0.035 * Math.sqrt(Math.max(0, 1.0 - r2 * 0.8));
+
+        // Nose protrusion (centered slightly below middle)
+        const noseDist = Math.sqrt(clampedU ** 2 + (clampedV + 0.15) ** 2);
+        if (noseDist < 0.25) {
+            const noseT = 1 - noseDist / 0.25;
+            z += 0.022 * noseT * noseT;
+        }
+
+        // Eye socket depressions
+        const leftEyeDist = Math.sqrt((clampedU + 0.35) ** 2 + (clampedV - 0.15) ** 2);
+        const rightEyeDist = Math.sqrt((clampedU - 0.35) ** 2 + (clampedV - 0.15) ** 2);
+        if (leftEyeDist < 0.15) {
+            z -= 0.008 * (1 - leftEyeDist / 0.15);
+        }
+        if (rightEyeDist < 0.15) {
+            z -= 0.008 * (1 - rightEyeDist / 0.15);
         }
 
         points.push({ x, y, z });
     }
 
-    points[1]   = { x: 0, y: -0.015, z: 0.05 };
-    points[6]   = { x: 0, y: 0.025, z: 0.035 };
-    points[4]   = { x: 0, y: -0.005, z: 0.045 };
-    points[5]   = { x: 0, y: 0.005, z: 0.04 };
-    points[2]   = { x: 0, y: -0.025, z: 0.04 };
-    points[164] = { x: 0, y: -0.03, z: 0.035 };
-    points[48]  = { x: -0.015, y: -0.015, z: 0.035 };
-    points[278] = { x: 0.015, y: -0.015, z: 0.035 };
-    points[60]  = { x: -0.008, y: -0.02, z: 0.038 };
-    points[290] = { x: 0.008, y: -0.02, z: 0.038 };
-    points[133] = { x: -0.025, y: 0.015, z: 0.02 };
-    points[362] = { x: 0.025, y: 0.015, z: 0.02 };
-    points[116] = { x: -0.022, y: 0.005, z: 0.025 };
-    points[345] = { x: 0.022, y: 0.005, z: 0.025 };
-    points[152] = { x: 0, y: -0.07, z: 0.01 };
-    points[168] = { x: 0, y: 0.04, z: 0.03 };
+    // Override key anatomical landmarks for zone system compatibility
+    points[1]   = { x: 0, y: 0.015, z: 0.055 };       // nose tip
+    points[6]   = { x: 0, y: -0.020, z: 0.042 };      // bridge top (nasion)
+    points[4]   = { x: 0, y: 0.005, z: 0.052 };       // supratip
+    points[5]   = { x: 0, y: -0.005, z: 0.048 };      // mid-dorsum
+    points[2]   = { x: 0, y: 0.025, z: 0.048 };       // sub-tip
+    points[164] = { x: 0, y: 0.032, z: 0.040 };       // columella base
+    points[48]  = { x: -0.015, y: 0.015, z: 0.042 };  // left alar
+    points[278] = { x: 0.015, y: 0.015, z: 0.042 };   // right alar
+    points[60]  = { x: -0.008, y: 0.020, z: 0.045 };  // left nostril
+    points[290] = { x: 0.008, y: 0.020, z: 0.045 };   // right nostril
+    points[133] = { x: -0.025, y: -0.012, z: 0.022 }; // left inner eye
+    points[362] = { x: 0.025, y: -0.012, z: 0.022 };  // right inner eye
+    points[33]  = { x: -0.040, y: -0.012, z: 0.015 }; // left outer eye
+    points[263] = { x: 0.040, y: -0.012, z: 0.015 };  // right outer eye
+    points[116] = { x: -0.022, y: -0.002, z: 0.028 }; // left infraorbital
+    points[345] = { x: 0.022, y: -0.002, z: 0.028 };  // right infraorbital
+    points[152] = { x: 0, y: 0.075, z: 0.012 };       // chin
+    points[10]  = { x: 0, y: -0.080, z: 0.025 };      // forehead
+    points[168] = { x: 0, y: -0.035, z: 0.035 };      // glabella
 
     return points;
 }
@@ -616,7 +876,7 @@ function buildFallbackTriangulation(landmarks) {
 }
 
 /**
- * Compute per-vertex normals from triangles.
+ * Compute per-vertex normals from triangles (area-weighted).
  */
 function computeNormals(landmarks) {
     const normals = landmarks.map(() => ({ x: 0, y: 0, z: 0 }));
@@ -667,16 +927,16 @@ function initViewer() {
     const h = container.clientHeight || Math.round(window.innerHeight * 0.45);
 
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x16162a);
+    scene.background = new THREE.Color(0x1a1a2e);
 
-    threeCamera = new THREE.PerspectiveCamera(40, w / h, 0.001, 10);
+    threeCamera = new THREE.PerspectiveCamera(35, w / h, 0.001, 10);
     threeCamera.position.set(0, 0, 0.35);
 
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.1;
+    renderer.toneMappingExposure = 1.0;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
 
@@ -688,25 +948,35 @@ function initViewer() {
     controls.maxDistance = 2;
     controls.enablePan = true;
 
-    // Lighting — even, soft illumination to show the face texture naturally
-    const front = new THREE.DirectionalLight(0xffffff, 1.8);
-    front.position.set(0, 0.2, 1);
-    scene.add(front);
+    // ── STUDIO-QUALITY LIGHTING ──
+    // Key light (front, slightly elevated and offset)
+    const keyLight = new THREE.DirectionalLight(0xfff5ee, 2.0);
+    keyLight.position.set(0.3, 0.4, 1);
+    scene.add(keyLight);
 
-    const left = new THREE.DirectionalLight(0xffffff, 1.0);
-    left.position.set(-0.6, 0.3, 0.7);
-    scene.add(left);
+    // Fill light (softer, from opposite side)
+    const fillLight = new THREE.DirectionalLight(0xe8e0f0, 1.0);
+    fillLight.position.set(-0.5, 0.2, 0.8);
+    scene.add(fillLight);
 
-    const right = new THREE.DirectionalLight(0xffffff, 1.0);
-    right.position.set(0.6, 0.3, 0.7);
-    scene.add(right);
+    // Rim light (from behind, for edge definition)
+    const rimLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    rimLight.position.set(0, 0.3, -0.8);
+    scene.add(rimLight);
 
-    const top = new THREE.DirectionalLight(0xffffff, 0.5);
-    top.position.set(0, 1, 0.2);
-    scene.add(top);
+    // Top light (simulates overhead/ceiling)
+    const topLight = new THREE.DirectionalLight(0xffffff, 0.4);
+    topLight.position.set(0, 1, 0.3);
+    scene.add(topLight);
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x444466, 0.4));
+    // Bottom bounce (warm uplight for chin/neck area)
+    const bounceLight = new THREE.DirectionalLight(0xffe8d0, 0.3);
+    bounceLight.position.set(0, -0.5, 0.5);
+    scene.add(bounceLight);
+
+    // Ambient + hemisphere for natural falloff
+    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    scene.add(new THREE.HemisphereLight(0xffeedd, 0x334466, 0.4));
 
     const resizeViewer = () => {
         const rw = container.clientWidth, rh = container.clientHeight;
@@ -752,6 +1022,11 @@ function autoCenterCamera() {
 
 /**
  * Build or update the 3D face mesh with healing deformation + texture.
+ *
+ * Key improvements over previous version:
+ * - Displacement is CAPPED relative to face scale (prevents vertex collapse)
+ * - SmoothStep weight interpolation (no hard zone boundaries)
+ * - MeshPhysicalMaterial with skin-like subsurface scattering approximation
  */
 function buildFaceMesh(day) {
     if (!baseLandmarks || !zoneWeights) return;
@@ -774,7 +1049,12 @@ function buildFaceMesh(day) {
     const colors = new Float32Array(N * 3);
     const uvs = hasTexture ? new Float32Array(N * 2) : null;
 
-    const displacementM = state.nasalVolumeDelta / 1000;
+    // ── DISPLACEMENT with safety cap ──
+    const rawDisplacementM = state.nasalVolumeDelta / 1000;
+    // Cap max displacement to 5% of face width to prevent vertex collapse
+    const maxSafeDisplacement = faceScale * 0.05;
+    const displacementM = Math.min(rawDisplacementM, maxSafeDisplacement);
+
     const skinR = 0.85, skinG = 0.72, skinB = 0.62;
 
     for (let i = 0; i < N; i++) {
@@ -782,8 +1062,10 @@ function buildFaceMesh(day) {
         const n = faceNormals[i];
         const zw = zoneWeights[i];
 
-        // Swelling deformation
-        const swellW = FaceZones.getSwellingWeight(zw);
+        // ── SWELLING DEFORMATION ──
+        const rawWeight = FaceZones.getSwellingWeight(zw);
+        // SmoothStep for gradual transitions between zones (no hard edges)
+        const swellW = rawWeight * rawWeight * (3 - 2 * rawWeight);
         positions[i * 3]     = lm.x + n.x * displacementM * swellW;
         positions[i * 3 + 1] = lm.y + n.y * displacementM * swellW;
         positions[i * 3 + 2] = lm.z + n.z * displacementM * swellW;
@@ -855,11 +1137,18 @@ function buildFaceMesh(day) {
         geo.setIndex(new THREE.BufferAttribute(triangleIndices, 1));
         geo.computeVertexNormals();
 
-        const mat = new THREE.MeshStandardMaterial({
+        // ── SKIN-LIKE MATERIAL (MeshPhysicalMaterial) ──
+        // Provides clearcoat (skin sheen) and sheen (subsurface scattering approx)
+        const mat = new THREE.MeshPhysicalMaterial({
             map: (hasTexture && !showZones) ? capturedTexture : null,
             vertexColors: true,
-            roughness: 0.6,
+            roughness: 0.55,
             metalness: 0.0,
+            clearcoat: 0.04,            // Subtle skin sheen
+            clearcoatRoughness: 0.85,
+            sheen: 0.3,                 // Subsurface scattering approximation
+            sheenRoughness: 0.8,
+            sheenColor: new THREE.Color(0.95, 0.65, 0.55),  // Warm skin undertone
             side: THREE.DoubleSide,
             flatShading: false,
         });
@@ -884,6 +1173,7 @@ function showScreen(screen) {
 
     if (screen === 'scan') {
         stableFrames = 0;
+        landmarkBuffer = [];
         document.getElementById('capture-btn').style.display = '';
         const fb = document.getElementById('camera-fallback-btn');
         if (fb) fb.remove();
@@ -975,6 +1265,7 @@ function init() {
         baseLandmarks = null;
         if (capturedTexture) { capturedTexture.dispose(); capturedTexture = null; }
         capturedUVs = null;
+        landmarkBuffer = [];
     });
 
     document.getElementById('timeline-slider').addEventListener('input', (e) => setDay(parseFloat(e.target.value)));

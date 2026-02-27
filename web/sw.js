@@ -3,7 +3,7 @@
  * Caches shell assets for offline use and faster repeat loads.
  */
 
-const CACHE_NAME = 'healing-timeline-v5';
+const CACHE_NAME = 'healing-timeline-v6';
 const SHELL_ASSETS = [
     './',
     './index.html',
