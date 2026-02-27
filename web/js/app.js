@@ -385,9 +385,8 @@ function calibrateLandmarksTo3D(landmarks) {
 
     // ── Z depth calibration ──
     // MediaPipe z is relative to face width in image space.
-    // For accurate depth, we scale z proportionally but with slight boost
-    // to preserve nose protrusion (typically 20–25mm, ~35% of IPD).
-    const zScale = scale * 1.2;
+    // Boosted scale to preserve nose protrusion and facial depth.
+    const zScale = scale * 1.5;
 
     // ── Convert all landmarks ──
     const calibrated = landmarks.map(lm => ({
@@ -398,7 +397,64 @@ function calibrateLandmarksTo3D(landmarks) {
 
     console.log(`[Calibrate] IPD=${(ipdNorm * 1000).toFixed(1)}px norm, scale=${scale.toFixed(3)}, faceWidth=${(faceScale * 1000).toFixed(1)}mm`);
 
+    // ── Anatomical depth correction ──
+    // MediaPipe's Z is compressed and noisy. Correct using known anatomy:
+    // nose protrusion = ~22mm (35% of IPD) above the face plane.
+    correctDepthAnatomically(calibrated);
+
     return calibrated;
+}
+
+/**
+ * Anatomical depth correction — rescales Z so that nose protrusion
+ * matches real-world anthropometry (~22mm above the face plane).
+ *
+ * MediaPipe's Z is a relative depth estimate that is typically too flat.
+ * By measuring the nose-to-face-plane distance and comparing to the
+ * known anthropometric norm, we can rescale depth proportionally.
+ *
+ * This preserves each person's unique face shape (wide nose, deep eyes, etc.)
+ * while ensuring the overall depth range is anatomically realistic.
+ */
+function correctDepthAnatomically(landmarks) {
+    // ── Define face plane from peripheral landmarks ──
+    // These landmarks lie roughly on the "face shell" perimeter
+    const peripheralIndices = [
+        33, 263,    // outer eye corners
+        127, 356,   // jaw corners
+        10,         // forehead center
+        152,        // chin
+        234, 454,   // temples
+    ];
+
+    let planeZ = 0, pCount = 0;
+    for (const idx of peripheralIndices) {
+        if (landmarks[idx]) { planeZ += landmarks[idx].z; pCount++; }
+    }
+    if (pCount === 0) return;
+    planeZ /= pCount;
+
+    // ── Current nose protrusion ──
+    const noseTip = landmarks[1];
+    if (!noseTip) return;
+    const currentProtrusion = noseTip.z - planeZ;
+
+    // ── Target: nose tip protrudes 22mm from face plane ──
+    // (Anthropometric norm for adults, ~35% of IPD)
+    const targetProtrusion = 0.022;
+
+    // Only correct if there's meaningful depth variation
+    if (Math.abs(currentProtrusion) < 0.001) return;
+
+    const depthScale = targetProtrusion / currentProtrusion;
+
+    // Rescale all Z values relative to the face plane
+    for (const lm of landmarks) {
+        if (!lm) continue;
+        lm.z = planeZ + (lm.z - planeZ) * depthScale;
+    }
+
+    console.log(`[Depth] Nose protrusion: ${(currentProtrusion * 1000).toFixed(1)}mm → ${(targetProtrusion * 1000).toFixed(1)}mm (×${depthScale.toFixed(2)})`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -514,13 +570,20 @@ function buildAdjacency(vertexCount, indices) {
  * the nose, filling eye sockets), HC Laplacian pulls smoothed vertices back
  * toward their original positions, preserving sharp features and volume.
  *
+ * KEY IMPROVEMENT: pinnedCount parameter pins the first N vertices (the original
+ * MediaPipe landmarks) in place. Only subdivision-interpolated vertices are
+ * smoothed. This preserves the individual's actual facial dimensions and geometry
+ * while creating a smooth surface between the measured landmark positions.
+ *
  * @param {Array} landmarks - Vertex positions [{x,y,z}]
  * @param {Uint32Array} indices - Triangle indices
- * @param {number} iterations - Number of smoothing passes (2-4 recommended)
+ * @param {number} iterations - Number of smoothing passes (1-3 recommended)
  * @param {number} alpha - Original position weight (0-1). Higher = more preservation.
  * @param {number} beta - Correction strength (0-1). Higher = more feature preservation.
+ * @param {number} pinnedCount - Number of vertices (from index 0) to keep FIXED.
+ *        Set to original landmark count (468) to preserve measured face geometry.
  */
-function smoothMeshHC(landmarks, indices, iterations = 3, alpha = 0.5, beta = 0.6) {
+function smoothMeshHC(landmarks, indices, iterations = 3, alpha = 0.5, beta = 0.6, pinnedCount = 0) {
     const adj = buildAdjacency(landmarks.length, indices);
 
     let current = landmarks.map(lm => ({ ...lm }));
@@ -528,7 +591,10 @@ function smoothMeshHC(landmarks, indices, iterations = 3, alpha = 0.5, beta = 0.
 
     for (let iter = 0; iter < iterations; iter++) {
         // Step 1: Standard Laplacian smooth (move toward neighbor average)
+        // Pinned vertices are NOT moved — their positions come from MediaPipe detection
         const smoothed = current.map((lm, i) => {
+            if (i < pinnedCount) return { ...lm };
+
             const neighbors = adj.get(i);
             if (!neighbors || neighbors.size === 0) return { ...lm };
 
@@ -541,14 +607,20 @@ function smoothMeshHC(landmarks, indices, iterations = 3, alpha = 0.5, beta = 0.
         });
 
         // Step 2: Compute displacement vectors (b) from weighted original
-        const bVectors = smoothed.map((lm, i) => ({
-            x: lm.x - (alpha * original[i].x + (1 - alpha) * current[i].x),
-            y: lm.y - (alpha * original[i].y + (1 - alpha) * current[i].y),
-            z: lm.z - (alpha * original[i].z + (1 - alpha) * current[i].z),
-        }));
+        // Pinned vertices have zero displacement
+        const bVectors = smoothed.map((lm, i) => {
+            if (i < pinnedCount) return { x: 0, y: 0, z: 0 };
+            return {
+                x: lm.x - (alpha * original[i].x + (1 - alpha) * current[i].x),
+                y: lm.y - (alpha * original[i].y + (1 - alpha) * current[i].y),
+                z: lm.z - (alpha * original[i].z + (1 - alpha) * current[i].z),
+            };
+        });
 
         // Step 3: HC correction — push back to preserve features
         current = smoothed.map((lm, i) => {
+            if (i < pinnedCount) return { ...lm };
+
             const neighbors = adj.get(i);
             if (!neighbors || neighbors.size === 0) {
                 return {
@@ -858,6 +930,10 @@ function captureFace() {
                 updateProcessingStatus('Subdividing mesh...');
                 await yieldToUI();
 
+                // Remember original landmark count — these will be PINNED during smoothing
+                // to preserve the individual's actual facial dimensions from MediaPipe.
+                const originalLandmarkCount = baseLandmarks.length; // 468
+
                 // First subdivision: ~800 → ~3200 triangles
                 let sub = subdivideMesh(baseLandmarks, triangleIndices, capturedUVs, zoneWeights);
                 console.log(`[Process] Step 5a/6: Subdivision 1 → ${sub.landmarks.length} verts`);
@@ -875,13 +951,15 @@ function captureFace() {
                 capturedUVs = sub.uvs;
                 zoneWeights = sub.weights;
 
-                // HC Laplacian smoothing
+                // HC Laplacian smoothing — ONLY on interpolated vertices
+                // Original 468 landmarks are PINNED to preserve face geometry.
+                // Fewer iterations: we only smooth the subdivided surface, not the structure.
                 updateProcessingStatus('Smoothing mesh...');
                 await yieldToUI();
 
-                const hcIter = mobile ? 2 : 3;
-                baseLandmarks = smoothMeshHC(baseLandmarks, triangleIndices, hcIter, 0.5, 0.65);
-                console.log(`[Process] Step 5c/6: HC smoothing (${hcIter} iterations)`);
+                const hcIter = mobile ? 1 : 2;
+                baseLandmarks = smoothMeshHC(baseLandmarks, triangleIndices, hcIter, 0.5, 0.7, originalLandmarkCount);
+                console.log(`[Process] Step 5c/6: HC smoothing (${hcIter} iter, ${originalLandmarkCount} pinned)`);
 
                 // Fix winding again after smoothing (shouldn't change but safety)
                 ensureOutwardFacing(triangleIndices, baseLandmarks);
