@@ -48,6 +48,10 @@ let faceScale = 0.14;
 // Delaunay triangulation library (loaded async from CDN)
 let Delaunator = null;
 
+// MediaPipe tessellation — saved from init for proper face topology
+// (much cleaner than Delaunay: no convex hull artifacts, proper face boundary)
+let mediapipeTessellation = null;
+
 // Default zone weight — defensive fallback for null/undefined entries
 const DEFAULT_WEIGHT = Object.freeze({
     zone: 'none', weight: 0, color: [0.15, 0.15, 0.15], isBruiseZone: false, healingRate: 'moderate'
@@ -96,6 +100,10 @@ async function initMediaPipe() {
                       || FaceLandmarker.FACE_LANDMARKS_TESSELLATION;
         if (tessData && tessData.length > 0) {
             buildTrianglesFromEdges(tessData);
+            // Save tessellation separately so it survives demo mode / re-scans
+            if (triangleIndices && triangleIndices.length > 0) {
+                mediapipeTessellation = new Uint32Array(triangleIndices);
+            }
             console.log(`[MediaPipe] Tessellation: ${tessData.length} edges → ${triangleIndices ? triangleIndices.length / 3 : 0} triangles`);
         } else {
             console.warn('[MediaPipe] No tessellation data — will use fallback');
@@ -885,25 +893,28 @@ function captureFace() {
 
     (async () => {
         try {
-            // ─── Step 1: DELAUNAY TRIANGULATION from 2D positions ───
-            // Build triangulation BEFORE 3D calibration (2D gives clean results)
+            // ─── Step 1: TRIANGULATION ───
+            // Prefer MediaPipe tessellation (proper face topology, clean boundary).
+            // Delaunay creates convex hull artifacts and jagged boundary.
             updateProcessingStatus('Building mesh triangulation...');
             await yieldToUI();
 
-            if (!Delaunator) await loadDelaunator();
-
-            if (Delaunator) {
-                triangleIndices = buildTrianglesDelaunay(avgLandmarks);
-                console.log(`[Process] Step 1/6: Delaunay → ${triangleIndices ? triangleIndices.length / 3 : 0} triangles`);
-            }
-
-            // Fallback to MediaPipe tessellation or spatial hashing
-            if (!triangleIndices || triangleIndices.length === 0) {
-                console.log('[Process] Delaunay unavailable, using fallback triangulation');
-                // Try with calibrated landmarks for fallback
-                const tempCal = calibrateLandmarksTo3D(avgLandmarks);
-                const fallback = buildFallbackTriangulation(tempCal);
-                if (fallback) triangleIndices = new Uint32Array(fallback);
+            if (mediapipeTessellation && mediapipeTessellation.length > 0) {
+                triangleIndices = new Uint32Array(mediapipeTessellation);
+                console.log(`[Process] Step 1/6: MediaPipe tessellation → ${triangleIndices.length / 3} triangles`);
+            } else {
+                // Fallback: Delaunay triangulation
+                if (!Delaunator) await loadDelaunator();
+                if (Delaunator) {
+                    triangleIndices = buildTrianglesDelaunay(avgLandmarks);
+                    console.log(`[Process] Step 1/6: Delaunay fallback → ${triangleIndices ? triangleIndices.length / 3 : 0} triangles`);
+                }
+                // Final fallback: spatial hashing
+                if (!triangleIndices || triangleIndices.length === 0) {
+                    const tempCal = calibrateLandmarksTo3D(avgLandmarks);
+                    const fallback = buildFallbackTriangulation(tempCal);
+                    if (fallback) triangleIndices = new Uint32Array(fallback);
+                }
             }
 
             // ─── Step 2: IPD-CALIBRATED 3D COORDINATES ───
@@ -926,7 +937,7 @@ function captureFace() {
             zoneWeights = FaceZones.computeZoneWeights(baseLandmarks);
             console.log(`[Process] Step 4/6: Zone weights computed`);
 
-            // ─── Step 5: SUBDIVISION + SMOOTHING ───
+            // ─── Step 5: MULTI-LEVEL SUBDIVISION + HC SMOOTHING ───
             if (triangleIndices && triangleIndices.length > 0) {
                 updateProcessingStatus('Subdividing mesh...');
                 await yieldToUI();
@@ -935,16 +946,26 @@ function captureFace() {
                 // to preserve the individual's actual facial dimensions from MediaPipe.
                 const originalLandmarkCount = baseLandmarks.length; // 468
 
-                // First subdivision: ~800 → ~3200 triangles
+                // Higher subdivision = smoother surface (no visible triangles)
+                // Desktop: 3 levels → ~28800 verts (photorealistic quality)
+                // Mobile:  2 levels → ~7200 verts (good quality, performance-safe)
+                const subdivLevels = mobile ? 2 : 3;
+
                 let sub = subdivideMesh(baseLandmarks, triangleIndices, capturedUVs, zoneWeights);
                 console.log(`[Process] Step 5a/6: Subdivision 1 → ${sub.landmarks.length} verts`);
 
-                // Second subdivision only on desktop
-                if (!mobile) {
-                    updateProcessingStatus('Refining mesh...');
+                if (subdivLevels >= 2) {
+                    updateProcessingStatus('Refining mesh (level 2)...');
                     await yieldToUI();
                     sub = subdivideMesh(sub.landmarks, sub.indices, sub.uvs, sub.weights);
                     console.log(`[Process] Step 5b/6: Subdivision 2 → ${sub.landmarks.length} verts`);
+                }
+
+                if (subdivLevels >= 3) {
+                    updateProcessingStatus('High-quality refinement (level 3)...');
+                    await yieldToUI();
+                    sub = subdivideMesh(sub.landmarks, sub.indices, sub.uvs, sub.weights);
+                    console.log(`[Process] Step 5c/6: Subdivision 3 → ${sub.landmarks.length} verts`);
                 }
 
                 baseLandmarks = sub.landmarks;
@@ -954,13 +975,15 @@ function captureFace() {
 
                 // HC Laplacian smoothing — ONLY on interpolated vertices
                 // Original 468 landmarks are PINNED to preserve face geometry.
-                // Fewer iterations: we only smooth the subdivided surface, not the structure.
+                // More iterations = silkier surface (eliminates all triangle artifacts)
+                // Desktop: 4 iterations for near-photorealistic smoothness
+                // Mobile:  2 iterations for good quality with acceptable perf
                 updateProcessingStatus('Smoothing mesh...');
                 await yieldToUI();
 
-                const hcIter = mobile ? 1 : 2;
+                const hcIter = mobile ? 2 : 4;
                 baseLandmarks = smoothMeshHC(baseLandmarks, triangleIndices, hcIter, 0.5, 0.7, originalLandmarkCount);
-                console.log(`[Process] Step 5c/6: HC smoothing (${hcIter} iter, ${originalLandmarkCount} pinned)`);
+                console.log(`[Process] Step 5d/6: HC smoothing (${hcIter} iter, ${originalLandmarkCount} pinned)`);
 
                 // Fix winding again after smoothing (shouldn't change but safety)
                 ensureOutwardFacing(triangleIndices, baseLandmarks);
@@ -1242,11 +1265,15 @@ function initViewer() {
     threeCamera = new THREE.PerspectiveCamera(35, w / h, 0.001, 10);
     threeCamera.position.set(0, 0, 0.35);
 
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: false,
+        powerPreference: 'high-performance',
+    });
     renderer.setSize(w, h);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.5));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.0;
+    renderer.toneMappingExposure = 1.05;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
 
@@ -1367,16 +1394,29 @@ function buildFaceMesh(day) {
 
     const skinR = 0.85, skinG = 0.72, skinB = 0.62;
 
-    // ── Compute face centroid for smooth displacement directions ──
+    // ── Compute face centroid + bounding box for displacement & boundary fade ──
     // Blending vertex normals with radial outward direction prevents
     // spiky artifacts from inconsistent/noisy per-vertex normals.
+    // Bounding box is used for the elliptical boundary fade (soft edge).
     let fcx = 0, fcy = 0, fcz = 0, validCount = 0;
+    let bbMinX = Infinity, bbMaxX = -Infinity;
+    let bbMinY = Infinity, bbMaxY = -Infinity;
     for (const lm of baseLandmarks) {
         if (!lm) continue;
         fcx += lm.x; fcy += lm.y; fcz += lm.z;
+        if (lm.x < bbMinX) bbMinX = lm.x;
+        if (lm.x > bbMaxX) bbMaxX = lm.x;
+        if (lm.y < bbMinY) bbMinY = lm.y;
+        if (lm.y > bbMaxY) bbMaxY = lm.y;
         validCount++;
     }
     if (validCount > 0) { fcx /= validCount; fcy /= validCount; fcz /= validCount; }
+
+    // Elliptical boundary radii for soft oval edge fade
+    const faceRadX = (bbMaxX - bbMinX) / 2;
+    const faceRadY = (bbMaxY - bbMinY) / 2;
+    // Background color of the viewer (matches scene.background 0x1a1a2e)
+    const bgR = 0.102, bgG = 0.102, bgB = 0.18;
 
     for (let i = 0; i < N; i++) {
         const lm = baseLandmarks[i];
@@ -1468,6 +1508,24 @@ function buildFaceMesh(day) {
             r = Math.min(1, r + sr); g = Math.max(0, g - sr * 0.3);
         }
 
+        // ── ELLIPTICAL BOUNDARY FADE ──
+        // Creates a soft oval edge that blends smoothly into the background,
+        // eliminating the jagged convex hull boundary.
+        // The fade starts at ~80% of the face radius and reaches full at ~100%.
+        if (faceRadX > 0.001 && faceRadY > 0.001) {
+            const normDx = (lm.x - fcx) / faceRadX;
+            const normDy = (lm.y - fcy) / faceRadY;
+            const ellipDist = Math.sqrt(normDx * normDx + normDy * normDy);
+            if (ellipDist > 0.78) {
+                // SmoothStep fade for natural falloff
+                const t = Math.min(1, (ellipDist - 0.78) / 0.22);
+                const fade = t * t * (3 - 2 * t); // smoothstep
+                r = r * (1 - fade) + bgR * fade;
+                g = g * (1 - fade) + bgG * fade;
+                b = b * (1 - fade) + bgB * fade;
+            }
+        }
+
         colors[i * 3] = Math.max(0, Math.min(1, r));
         colors[i * 3 + 1] = Math.max(0, Math.min(1, g));
         colors[i * 3 + 2] = Math.max(0, Math.min(1, b));
@@ -1483,17 +1541,29 @@ function buildFaceMesh(day) {
         geo.setIndex(new THREE.BufferAttribute(triangleIndices, 1));
         geo.computeVertexNormals();
 
-        // ── SKIN-LIKE MATERIAL (MeshPhysicalMaterial) ──
-        // Provides clearcoat (skin sheen) and sheen (subsurface scattering approx)
+        // ── PHOTOREALISTIC SKIN MATERIAL ──
+        // MeshPhysicalMaterial with carefully tuned skin-like properties:
+        // - Low roughness for smooth, healthy-looking skin
+        // - Sheen for subsurface scattering approximation (light through skin)
+        // - Clearcoat for the oily T-zone sheen
+        // - Anisotropic filtering on texture for sharp details at angles
+        const useTexture = hasTexture && !showZones;
+        if (useTexture && capturedTexture) {
+            capturedTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+            capturedTexture.minFilter = THREE.LinearMipmapLinearFilter;
+            capturedTexture.magFilter = THREE.LinearFilter;
+            capturedTexture.generateMipmaps = true;
+        }
+
         const mat = new THREE.MeshPhysicalMaterial({
-            map: (hasTexture && !showZones) ? capturedTexture : null,
+            map: useTexture ? capturedTexture : null,
             vertexColors: true,
-            roughness: 0.55,
+            roughness: 0.48,             // Slightly smoother = more realistic skin
             metalness: 0.0,
-            clearcoat: 0.04,            // Subtle skin sheen
-            clearcoatRoughness: 0.85,
-            sheen: 0.3,                 // Subsurface scattering approximation
-            sheenRoughness: 0.8,
+            clearcoat: 0.06,             // Subtle skin sheen (oily T-zone)
+            clearcoatRoughness: 0.75,
+            sheen: 0.4,                  // Subsurface scattering approximation
+            sheenRoughness: 0.7,
             sheenColor: new THREE.Color(0.95, 0.65, 0.55),  // Warm skin undertone
             side: THREE.DoubleSide,
             flatShading: false,
