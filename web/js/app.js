@@ -596,8 +596,51 @@ function smoothMesh(landmarks, indices, iterations = 2, factor = 0.3) {
 // CAPTURE + MESH CONSTRUCTION
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * Detect mobile device for performance-adaptive processing.
+ */
+function isMobileDevice() {
+    return /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+        || (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
+}
+
+/**
+ * Update the processing screen status text.
+ */
+function updateProcessingStatus(msg) {
+    const el = document.querySelector('#screen-processing p');
+    if (el) el.textContent = msg;
+}
+
+/**
+ * Show an error on the processing screen with a back button.
+ */
+function showProcessingError(msg) {
+    console.error('[Process] Error:', msg);
+    const container = document.querySelector('.processing-content');
+    if (container) {
+        container.innerHTML = `
+            <div style="color: #ff6b6b; font-size: 48px;">&#9888;</div>
+            <h2>Processing Error</h2>
+            <p style="color: #ccc; max-width: 300px; margin: 0 auto;">${msg}</p>
+            <button class="btn-primary" style="margin-top: 20px;" id="process-error-back">Back to Start</button>
+        `;
+        document.getElementById('process-error-back').addEventListener('click', () => showScreen('splash'));
+    }
+}
+
+/**
+ * Small async yield to let the browser update the UI (spinner, status text).
+ */
+function yieldToUI(ms = 30) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function captureFace() {
-    if (!capturedLandmarks) return;
+    if (!capturedLandmarks) {
+        console.warn('[Capture] No face landmarks detected — aborting');
+        return;
+    }
 
     // ─── 1. CAPTURE HIGH-RES VIDEO FRAME AS TEXTURE ───
     const video = document.getElementById('camera-video');
@@ -611,7 +654,7 @@ function captureFace() {
     capturedTexture.colorSpace = THREE.SRGBColorSpace;
     capturedTexture.minFilter = THREE.LinearMipmapLinearFilter;
     capturedTexture.magFilter = THREE.LinearFilter;
-    capturedTexture.anisotropy = 4;  // Better texture quality at angles
+    capturedTexture.anisotropy = 4;
     capturedTexture.generateMipmaps = true;
 
     console.log(`[Capture] Texture: ${texCanvas.width}×${texCanvas.height}`);
@@ -628,61 +671,104 @@ function captureFace() {
 
     // ─── 3. UV COORDINATES from averaged 2D positions ───
     capturedUVs = avgLandmarks.map(lm => ({
-        u: lm.x,           // direct x mapping to texture
-        v: 1.0 - lm.y      // flip y (Three.js v goes bottom-to-top)
+        u: lm.x,
+        v: 1.0 - lm.y
     }));
 
     // Stop camera
     if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
 
     showScreen('processing');
+    updateProcessingStatus('Capturing face data...');
 
-    setTimeout(() => {
-        // ─── 4. IPD-CALIBRATED 3D COORDINATES ───
-        baseLandmarks = calibrateLandmarksTo3D(avgLandmarks);
+    // ─── ASYNC PROCESSING PIPELINE ───
+    // Broken into steps with UI yields to prevent browser freeze on mobile.
+    const mobile = isMobileDevice();
+    console.log(`[Process] Device: ${mobile ? 'MOBILE' : 'DESKTOP'}`);
 
-        // ─── 5. COMPUTE ZONE WEIGHTS on original 468 landmarks ───
-        zoneWeights = FaceZones.computeZoneWeights(baseLandmarks);
+    (async () => {
+        try {
+            // ─── Step 1: IPD-CALIBRATED 3D COORDINATES ───
+            updateProcessingStatus('Calibrating 3D proportions...');
+            await yieldToUI();
 
-        // Ensure we have triangle indices
-        if (!triangleIndices || triangleIndices.length === 0) {
-            const fallback = buildFallbackTriangulation(baseLandmarks);
-            if (fallback) triangleIndices = new Uint32Array(fallback);
-        }
+            baseLandmarks = calibrateLandmarksTo3D(avgLandmarks);
+            console.log(`[Process] Step 1/5: Calibrated ${baseLandmarks.length} landmarks`);
 
-        // ─── 6. TWO-LEVEL SUBDIVISION for ultra-smooth mesh ───
-        if (triangleIndices && triangleIndices.length > 0) {
-            // First subdivision: ~468 → ~2000 vertices
-            let sub = subdivideMesh(baseLandmarks, triangleIndices, capturedUVs, zoneWeights);
+            // ─── Step 2: ZONE WEIGHTS on original 468 landmarks ───
+            updateProcessingStatus('Mapping anatomical zones...');
+            await yieldToUI();
 
-            // Second subdivision: ~2000 → ~8000 vertices
-            sub = subdivideMesh(sub.landmarks, sub.indices, sub.uvs, sub.weights);
+            zoneWeights = FaceZones.computeZoneWeights(baseLandmarks);
+            console.log(`[Process] Step 2/5: Zone weights computed`);
 
-            baseLandmarks = sub.landmarks;
-            triangleIndices = sub.indices;
-            capturedUVs = sub.uvs;
-            zoneWeights = sub.weights;
+            // Ensure triangle indices exist
+            if (!triangleIndices || triangleIndices.length === 0) {
+                updateProcessingStatus('Building mesh triangulation...');
+                await yieldToUI();
+                const fallback = buildFallbackTriangulation(baseLandmarks);
+                if (fallback) triangleIndices = new Uint32Array(fallback);
+                console.log(`[Process] Fallback triangulation: ${triangleIndices ? triangleIndices.length / 3 : 0} triangles`);
+            }
 
-            // ─── 7. HC LAPLACIAN SMOOTHING (feature-preserving) ───
-            // Unlike standard Laplacian, this preserves nose bridge, nostrils, eye sockets
-            baseLandmarks = smoothMeshHC(baseLandmarks, triangleIndices, 3, 0.5, 0.65);
-        }
+            // ─── Step 3: SUBDIVISION ───
+            if (triangleIndices && triangleIndices.length > 0) {
+                updateProcessingStatus('Subdividing mesh (pass 1)...');
+                await yieldToUI();
 
-        // ─── 8. COMPUTE NORMALS on final mesh ───
-        faceNormals = computeNormals(baseLandmarks);
+                // First subdivision: ~468 → ~2000 vertices
+                let sub = subdivideMesh(baseLandmarks, triangleIndices, capturedUVs, zoneWeights);
+                console.log(`[Process] Step 3a/5: Subdivision 1 → ${sub.landmarks.length} verts, ${sub.indices.length / 3} tris`);
 
-        console.log(`[Mesh] Final: ${baseLandmarks.length} vertices, ${triangleIndices.length / 3} triangles`);
+                // Second subdivision only on desktop (too heavy for mobile)
+                if (!mobile) {
+                    updateProcessingStatus('Subdividing mesh (pass 2)...');
+                    await yieldToUI();
+                    sub = subdivideMesh(sub.landmarks, sub.indices, sub.uvs, sub.weights);
+                    console.log(`[Process] Step 3b/5: Subdivision 2 → ${sub.landmarks.length} verts, ${sub.indices.length / 3} tris`);
+                }
 
-        // Show viewer, then init 3D
-        showScreen('viewer');
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
+                baseLandmarks = sub.landmarks;
+                triangleIndices = sub.indices;
+                capturedUVs = sub.uvs;
+                zoneWeights = sub.weights;
+
+                // ─── Step 4: HC LAPLACIAN SMOOTHING ───
+                updateProcessingStatus('Smoothing mesh...');
+                await yieldToUI();
+
+                const hcIterations = mobile ? 2 : 3;
+                baseLandmarks = smoothMeshHC(baseLandmarks, triangleIndices, hcIterations, 0.5, 0.65);
+                console.log(`[Process] Step 4/5: HC smoothing (${hcIterations} iterations)`);
+            }
+
+            // ─── Step 5: NORMALS ───
+            updateProcessingStatus('Finalizing 3D model...');
+            await yieldToUI();
+
+            faceNormals = computeNormals(baseLandmarks);
+            console.log(`[Process] Step 5/5: Done! ${baseLandmarks.length} vertices, ${triangleIndices ? triangleIndices.length / 3 : 0} triangles`);
+
+            // ─── Show viewer ───
+            showScreen('viewer');
+            await yieldToUI(100);
+
+            try {
                 initViewer();
                 buildFaceMesh(0);
                 autoCenterCamera();
-            });
-        });
-    }, 600);
+                console.log('[Process] ✓ Viewer ready');
+            } catch (viewerErr) {
+                console.error('[Viewer] Init failed:', viewerErr);
+                showScreen('processing');
+                showProcessingError('3D viewer failed: ' + viewerErr.message);
+            }
+
+        } catch (err) {
+            console.error('[Process] Pipeline failed:', err);
+            showProcessingError('Scan processing failed: ' + (err.message || 'Unknown error'));
+        }
+    })();
 }
 
 function useSampleFace() {
