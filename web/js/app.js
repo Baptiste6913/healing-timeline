@@ -542,7 +542,7 @@ function calibrateLandmarksTo3D(landmarks) {
     const useDepthMap = capturedDepthMap && capturedDepthMap.data;
 
     // Always start with MediaPipe Z as the base (reliable structure)
-    const zScale = scale * 1.5;
+    const zScale = scale * 2.5;
     let calibrated = landmarks.map(lm => ({
         x: (lm.x - centerX) * scale,
         y: -(lm.y - centerY) * scale,
@@ -598,16 +598,13 @@ function calibrateLandmarksTo3D(landmarks) {
         const p90 = sorted[Math.floor(sorted.length * 0.90)];
         const pRange = p90 - p10;
 
-        // Target depth variation: nose-to-cheek ~22mm
-        const targetDepthRange = 0.022;
+        // Target depth variation: nose-tip to ear plane ~45mm
+        const targetDepthRange = 0.045;
 
         console.log(`[Calibrate] Depth p10=${p10.toFixed(3)}, p90=${p90.toFixed(3)}, Δ=${pRange.toFixed(4)}`);
 
         if (pRange > 0.005) {
-            // Apply depth correction: anatomical depth correction first
-            correctDepthAnatomically(calibrated);
-
-            // Then blend in depth map values (60% depth map, 40% MediaPipe)
+            // Blend depth map values FIRST (60% AI depth + 40% MediaPipe)
             for (let i = 0; i < calibrated.length; i++) {
                 // Clamp normalized depth to [0, 1]
                 const normDepth = Math.max(0, Math.min(1,
@@ -620,6 +617,10 @@ function calibrateLandmarksTo3D(landmarks) {
                 // Blend: 60% AI depth + 40% MediaPipe (keeps structural integrity)
                 calibrated[i].z = depthZ * 0.6 + mediaZ * 0.4;
             }
+
+            // THEN apply anatomical correction as final normalization
+            // This ensures nose protrusion matches anthropometric target
+            correctDepthAnatomically(calibrated);
 
             console.log(`[Calibrate] IPD=${(ipdNorm * 1000).toFixed(1)}px, scale=${scale.toFixed(3)}, depth=Blended(DAv2+MP)`);
         } else {
@@ -637,7 +638,7 @@ function calibrateLandmarksTo3D(landmarks) {
 
 /**
  * Anatomical depth correction — rescales Z so that nose protrusion
- * matches real-world anthropometry (~22mm above the face plane).
+ * matches real-world anthropometry (~28mm above the face plane).
  *
  * MediaPipe's Z is a relative depth estimate that is typically too flat.
  * By measuring the nose-to-face-plane distance and comparing to the
@@ -669,9 +670,9 @@ function correctDepthAnatomically(landmarks) {
     if (!noseTip) return;
     const currentProtrusion = noseTip.z - planeZ;
 
-    // ── Target: nose tip protrudes 22mm from face plane ──
-    // (Anthropometric norm for adults, ~35% of IPD)
-    const targetProtrusion = 0.022;
+    // ── Target: nose tip protrudes 28mm from face plane ──
+    // (Anthropometric norm for adults, ~44% of IPD)
+    const targetProtrusion = 0.028;
 
     // Only correct if there's meaningful depth variation
     if (Math.abs(currentProtrusion) < 0.001) return;
@@ -735,6 +736,28 @@ function subdivideMesh(landmarks, indices, uvData, weights) {
         const w1 = weights[i1] || DEFAULT_WEIGHT;
         const c0 = Array.isArray(w0.color) ? w0.color : [0.15, 0.15, 0.15];
         const c1 = Array.isArray(w1.color) ? w1.color : [0.15, 0.15, 0.15];
+
+        // Interpolate bruiseBlend continuously
+        const bb0 = typeof w0.bruiseBlend === 'number' ? w0.bruiseBlend : (w0.isBruiseZone ? 1 : 0);
+        const bb1 = typeof w1.bruiseBlend === 'number' ? w1.bruiseBlend : (w1.isBruiseZone ? 1 : 0);
+        const midBruise = (bb0 + bb1) / 2;
+
+        // Interpolate healing rate weights for smooth swelling transitions
+        const hr0 = w0.healingRateWeights || { very_slow: 0, slow: 0, moderate: 1, fast: 0 };
+        const hr1 = w1.healingRateWeights || { very_slow: 0, slow: 0, moderate: 1, fast: 0 };
+        const midHR = {
+            very_slow: (hr0.very_slow + hr1.very_slow) / 2,
+            slow: (hr0.slow + hr1.slow) / 2,
+            moderate: (hr0.moderate + hr1.moderate) / 2,
+            fast: (hr0.fast + hr1.fast) / 2,
+        };
+
+        // Find dominant healing rate
+        let bestHR = 'moderate', bestHRW = 0;
+        for (const k of ['very_slow', 'slow', 'moderate', 'fast']) {
+            if (midHR[k] > bestHRW) { bestHRW = midHR[k]; bestHR = k; }
+        }
+
         newWeights.push({
             zone: (w0.weight || 0) >= (w1.weight || 0) ? w0.zone : w1.zone,
             weight: ((w0.weight || 0) + (w1.weight || 0)) / 2,
@@ -743,8 +766,10 @@ function subdivideMesh(landmarks, indices, uvData, weights) {
                 (c0[1] + c1[1]) / 2,
                 (c0[2] + c1[2]) / 2,
             ],
-            isBruiseZone: !!(w0.isBruiseZone || w1.isBruiseZone),
-            healingRate: (w0.weight || 0) >= (w1.weight || 0) ? (w0.healingRate || 'moderate') : (w1.healingRate || 'moderate'),
+            isBruiseZone: midBruise > 0.3,
+            bruiseBlend: midBruise,
+            healingRate: bestHR,
+            healingRateWeights: midHR,
         });
 
         edgeMap.set(key, idx);
@@ -879,6 +904,99 @@ function smoothMeshHC(landmarks, indices, iterations = 3, alpha = 0.5, beta = 0.
     }
 
     return current;
+}
+
+/**
+ * Smooth zone weights across the mesh for seamless transitions.
+ *
+ * Applies Laplacian averaging to bruiseBlend, healingRateWeights, weight, and color
+ * on interpolated vertices (index >= pinnedCount). Original landmark weights stay fixed.
+ *
+ * This eliminates hard zone boundaries caused by winner-take-all assignment
+ * during subdivision, creating gradual transitions between healing zones.
+ *
+ * @param {Array} weights - Zone weight objects for each vertex
+ * @param {Uint32Array} indices - Triangle indices
+ * @param {number} pinnedCount - Original landmarks to keep fixed
+ * @param {number} iterations - Smoothing passes (2-3 recommended)
+ */
+function smoothZoneWeights(weights, indices, pinnedCount = 0, iterations = 2) {
+    const adj = buildAdjacency(weights.length, indices);
+
+    for (let iter = 0; iter < iterations; iter++) {
+        const prev = weights.map(w => w ? { ...w } : null);
+
+        for (let i = pinnedCount; i < weights.length; i++) {
+            const neighbors = adj.get(i);
+            if (!neighbors || neighbors.size === 0) continue;
+
+            const pw = prev[i];
+            if (!pw) continue;
+
+            // Accumulate neighbor values
+            let sumWeight = pw.weight || 0;
+            let sumBruise = pw.bruiseBlend || 0;
+            let sumR = pw.color ? pw.color[0] : 0;
+            let sumG = pw.color ? pw.color[1] : 0;
+            let sumB = pw.color ? pw.color[2] : 0;
+            const sumHR = {
+                very_slow: pw.healingRateWeights ? pw.healingRateWeights.very_slow : 0,
+                slow:      pw.healingRateWeights ? pw.healingRateWeights.slow : 0,
+                moderate:  pw.healingRateWeights ? pw.healingRateWeights.moderate : 1,
+                fast:      pw.healingRateWeights ? pw.healingRateWeights.fast : 0,
+            };
+            let count = 1;
+
+            for (const n of neighbors) {
+                const nw = prev[n];
+                if (!nw) continue;
+                sumWeight += nw.weight || 0;
+                sumBruise += nw.bruiseBlend || 0;
+                sumR += nw.color ? nw.color[0] : 0;
+                sumG += nw.color ? nw.color[1] : 0;
+                sumB += nw.color ? nw.color[2] : 0;
+                if (nw.healingRateWeights) {
+                    sumHR.very_slow += nw.healingRateWeights.very_slow || 0;
+                    sumHR.slow      += nw.healingRateWeights.slow || 0;
+                    sumHR.moderate  += nw.healingRateWeights.moderate || 0;
+                    sumHR.fast      += nw.healingRateWeights.fast || 0;
+                }
+                count++;
+            }
+
+            const inv = 1 / count;
+            weights[i].weight = sumWeight * inv;
+            weights[i].bruiseBlend = sumBruise * inv;
+            weights[i].color = [sumR * inv, sumG * inv, sumB * inv];
+
+            // Normalize healing rate weights
+            const hrW = {
+                very_slow: sumHR.very_slow * inv,
+                slow:      sumHR.slow * inv,
+                moderate:  sumHR.moderate * inv,
+                fast:      sumHR.fast * inv,
+            };
+            const hrTotal = hrW.very_slow + hrW.slow + hrW.moderate + hrW.fast;
+            if (hrTotal > 0) {
+                hrW.very_slow /= hrTotal;
+                hrW.slow /= hrTotal;
+                hrW.moderate /= hrTotal;
+                hrW.fast /= hrTotal;
+            }
+            weights[i].healingRateWeights = hrW;
+
+            // Update dominant healing rate
+            let bestHR = 'moderate', bestHRW = 0;
+            for (const k of ['very_slow', 'slow', 'moderate', 'fast']) {
+                if (hrW[k] > bestHRW) { bestHRW = hrW[k]; bestHR = k; }
+            }
+            weights[i].healingRate = bestHR;
+            weights[i].isBruiseZone = weights[i].bruiseBlend > 0.3;
+        }
+    }
+
+    console.log(`[SmoothWeights] ${iterations} passes on ${weights.length - pinnedCount} interpolated vertices`);
+    return weights;
 }
 
 /**
@@ -1225,6 +1343,13 @@ function captureFace() {
                 capturedUVs = sub.uvs;
                 zoneWeights = sub.weights;
 
+                // Smooth zone weights for seamless transitions (eliminates geometric patterns)
+                // Only interpolated vertices are smoothed — original 468 landmarks stay fixed.
+                updateProcessingStatus('Smoothing zone transitions...');
+                await yieldToUI();
+                const zwIter = mobile ? 2 : 3;
+                smoothZoneWeights(zoneWeights, triangleIndices, originalLandmarkCount, zwIter);
+
                 // HC Laplacian smoothing — ONLY on interpolated vertices
                 // Original 468 landmarks are PINNED to preserve face geometry.
                 // More iterations = silkier surface (eliminates all triangle artifacts)
@@ -1302,10 +1427,14 @@ function useSampleFace() {
 
         // Single-level subdivision + smoothing for demo mesh
         if (triangleIndices && triangleIndices.length > 0) {
+            const demoOrigCount = baseLandmarks.length;
             let sub = subdivideMesh(baseLandmarks, triangleIndices, null, zoneWeights);
             baseLandmarks = sub.landmarks;
             triangleIndices = sub.indices;
             zoneWeights = sub.weights;
+
+            // Smooth zone weights for seamless transitions
+            smoothZoneWeights(zoneWeights, triangleIndices, demoOrigCount, 2);
 
             // Moderate smoothing for clean organic surface
             baseLandmarks = smoothMesh(baseLandmarks, triangleIndices, 4, 0.35);
@@ -1354,13 +1483,13 @@ function generateSampleFaceLandmarks() {
 
         // Z: spherical face curvature + nose protrusion
         const r2 = (clampedU * 0.7) ** 2 + clampedV ** 2;
-        let z = 0.035 * Math.sqrt(Math.max(0, 1.0 - r2 * 0.8));
+        let z = 0.045 * Math.sqrt(Math.max(0, 1.0 - r2 * 0.8));
 
         // Nose protrusion (centered slightly below middle)
         const noseDist = Math.sqrt(clampedU ** 2 + (clampedV + 0.15) ** 2);
         if (noseDist < 0.25) {
             const noseT = 1 - noseDist / 0.25;
-            z += 0.022 * noseT * noseT;
+            z += 0.030 * noseT * noseT;
         }
 
         // Eye socket depressions
@@ -1688,9 +1817,22 @@ function buildFaceMesh(day) {
         const dirZ = 0.995; // ~99.5% forward, ~0.5% lateral
 
         // ── ZONE-SPECIFIC SWELLING DEFORMATION ──
-        const zoneRate = zw.healingRate || 'moderate';
-        const zoneSwell = zoneSwellingMap[zoneRate] !== undefined
-            ? zoneSwellingMap[zoneRate] : (state.swellingLevel || 0);
+        // Use healingRateWeights for smooth blending across zone boundaries
+        // instead of a single discrete healing rate (which causes geometric patterns)
+        let zoneSwell;
+        const hrW = zw.healingRateWeights;
+        if (hrW && (hrW.very_slow + hrW.slow + hrW.moderate + hrW.fast) > 0.01) {
+            // Weighted blend of all healing rate swelling values
+            zoneSwell = (hrW.very_slow * (zoneSwellingMap.very_slow || 0))
+                      + (hrW.slow     * (zoneSwellingMap.slow || 0))
+                      + (hrW.moderate * (zoneSwellingMap.moderate || 0))
+                      + (hrW.fast     * (zoneSwellingMap.fast || 0));
+        } else {
+            // Fallback: single rate
+            const zoneRate = zw.healingRate || 'moderate';
+            zoneSwell = zoneSwellingMap[zoneRate] !== undefined
+                ? zoneSwellingMap[zoneRate] : (state.swellingLevel || 0);
+        }
         const rawDisp = (zoneSwell * maxDispMM) / 1000;
         const disp = Math.min(rawDisp, maxSafeDisplacement);
 

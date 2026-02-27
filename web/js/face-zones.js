@@ -301,80 +301,154 @@ const FaceZones = (() => {
         return map;
     }
 
+    // ── Healing rate constants for weighted blending ──
+    const HEALING_RATE_ORDER = ['very_slow', 'slow', 'moderate', 'fast'];
+
     /**
      * Compute per-vertex zone weights for all landmarks.
      * Uses a hybrid approach:
      * 1) Hard assignment for landmarks explicitly listed in zones
-     * 2) Distance-based gaussian falloff for unlisted landmarks
+     * 2) Distance-based gaussian falloff with WEIGHTED ACCUMULATION for unlisted landmarks
+     *
+     * Key improvements over winner-take-all:
+     *   - Accumulates ALL reference influences (smooth transitions between zones)
+     *   - Outputs continuous bruiseBlend (0-1 float) instead of boolean
+     *   - Outputs healingRateWeights for smooth swelling blending across zone boundaries
      *
      * @param {Array} landmarks - Array of {x, y, z} positions
-     * @returns {Array} - Array of {weight, color, isBruiseZone, zone, healingRate}
+     * @returns {Array} - Array of {weight, color, isBruiseZone, bruiseBlend, zone, healingRate, healingRateWeights}
      */
     function computeZoneWeights(landmarks) {
         const landmarkMap = buildLandmarkMap();
         const N = landmarks ? landmarks.length : 468;
         const weights = new Array(N);
 
-        // First pass: assign explicit zone members
+        // First pass: assign explicit zone members with full bruiseBlend
         for (let i = 0; i < N; i++) {
             const explicit = landmarkMap.get(i);
             if (explicit) {
-                weights[i] = { ...explicit };
+                // Compute bruiseBlend for explicit zone members
+                let bruiseBlend = 0;
+                if (explicit.isBruiseZone) {
+                    bruiseBlend = explicit.weight * 2.0; // amplified for bruise zones
+                } else if (explicit.zone.startsWith("nasal_") || explicit.zone === "supratip") {
+                    bruiseBlend = explicit.weight * 0.3; // mild for nose zones
+                }
+                // Build healingRateWeights: 100% for the assigned rate
+                const hrWeights = { very_slow: 0, slow: 0, moderate: 0, fast: 0 };
+                hrWeights[explicit.healingRate || 'moderate'] = 1.0;
+
+                weights[i] = {
+                    ...explicit,
+                    bruiseBlend: Math.min(1, bruiseBlend),
+                    healingRateWeights: hrWeights,
+                };
             } else {
                 weights[i] = null; // will be computed via distance
             }
         }
 
-        // Second pass: distance-based falloff for unassigned vertices
+        // Second pass: WEIGHTED ACCUMULATION for unassigned vertices
+        // Instead of winner-take-all, blend all nearby reference influences
         for (let i = 0; i < N; i++) {
             if (weights[i] !== null) continue;
 
             const pos = landmarks[i];
-            // Guard against missing/undefined landmark positions
             if (!pos || typeof pos.x !== 'number') {
-                weights[i] = { zone: "none", weight: 0, color: [0.15, 0.15, 0.15], isBruiseZone: false, healingRate: 'moderate' };
+                weights[i] = {
+                    zone: "none", weight: 0, color: [0.15, 0.15, 0.15],
+                    isBruiseZone: false, bruiseBlend: 0,
+                    healingRate: 'moderate',
+                    healingRateWeights: { very_slow: 0, slow: 0, moderate: 1, fast: 0 },
+                };
                 continue;
             }
-            let bestWeight = 0;
-            let bestColor = [0.15, 0.15, 0.15]; // dark gray = no zone
-            let bestZone = "none";
-            let isBruise = false;
-            let bestHealingRate = 'moderate';
 
-            // Check distance to each reference point
+            // Accumulate all influences
+            let totalInfluence = 0;
+            let accR = 0, accG = 0, accB = 0;
+            let accBruise = 0;
+            let bestZone = "none";
+            let bestInfluence = 0;
+            const hrAccum = { very_slow: 0, slow: 0, moderate: 0, fast: 0 };
+
             for (const [refName, refIdx] of Object.entries(REFERENCE_POINTS)) {
                 const refPos = landmarks[refIdx];
                 if (!refPos) continue;
+
+                const refZone = landmarkMap.get(refIdx);
+                if (!refZone) continue;
 
                 const dx = pos.x - refPos.x;
                 const dy = pos.y - refPos.y;
                 const dz = pos.z - refPos.z;
                 const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-                // Find which zone this reference belongs to
-                const refZone = landmarkMap.get(refIdx);
-                if (!refZone) continue;
-
-                // Gaussian falloff: influence = weight * exp(-dist^2 / (2*sigma^2))
-                const sigma = 0.04; // ~4% of face width
+                // Wider Gaussian falloff for smooth transitions
+                const sigma = 0.12; // ~12% of face width (~17mm)
                 const influence = refZone.weight * Math.exp(-(dist * dist) / (2 * sigma * sigma));
 
-                if (influence > bestWeight) {
-                    bestWeight = influence;
-                    bestColor = refZone.color;
+                if (influence < 0.001) continue; // skip negligible
+
+                totalInfluence += influence;
+                const c = Array.isArray(refZone.color) ? refZone.color : [0.15, 0.15, 0.15];
+                accR += c[0] * influence;
+                accG += c[1] * influence;
+                accB += c[2] * influence;
+
+                // Accumulate bruise blend
+                let refBruise = 0;
+                if (refZone.isBruiseZone) refBruise = 2.0;
+                else if (refZone.zone.startsWith("nasal_") || refZone.zone === "supratip") refBruise = 0.3;
+                accBruise += refBruise * influence;
+
+                // Accumulate healing rate weights
+                const hr = refZone.healingRate || 'moderate';
+                hrAccum[hr] = (hrAccum[hr] || 0) + influence;
+
+                // Track dominant zone for display purposes
+                if (influence > bestInfluence) {
+                    bestInfluence = influence;
                     bestZone = refZone.zone;
-                    isBruise = refZone.isBruiseZone;
-                    bestHealingRate = refZone.healingRate || 'moderate';
                 }
             }
 
-            weights[i] = {
-                zone: bestZone,
-                weight: Math.max(0, Math.min(1, bestWeight)),
-                color: bestColor,
-                isBruiseZone: isBruise,
-                healingRate: bestHealingRate
-            };
+            if (totalInfluence > 0.001) {
+                // Normalize
+                const invTotal = 1.0 / totalInfluence;
+                const blendedColor = [accR * invTotal, accG * invTotal, accB * invTotal];
+                const blendedBruise = Math.min(1, accBruise * invTotal);
+
+                // Normalize healing rate weights
+                const hrTotal = hrAccum.very_slow + hrAccum.slow + hrAccum.moderate + hrAccum.fast;
+                if (hrTotal > 0) {
+                    for (const k of HEALING_RATE_ORDER) hrAccum[k] /= hrTotal;
+                }
+
+                // Dominant healing rate = highest weight
+                let bestHR = 'moderate';
+                let bestHRW = 0;
+                for (const k of HEALING_RATE_ORDER) {
+                    if (hrAccum[k] > bestHRW) { bestHRW = hrAccum[k]; bestHR = k; }
+                }
+
+                weights[i] = {
+                    zone: bestZone,
+                    weight: Math.max(0, Math.min(1, bestInfluence)),
+                    color: blendedColor,
+                    isBruiseZone: blendedBruise > 0.3,
+                    bruiseBlend: blendedBruise,
+                    healingRate: bestHR,
+                    healingRateWeights: { ...hrAccum },
+                };
+            } else {
+                weights[i] = {
+                    zone: "none", weight: 0, color: [0.15, 0.15, 0.15],
+                    isBruiseZone: false, bruiseBlend: 0,
+                    healingRate: 'moderate',
+                    healingRateWeights: { very_slow: 0, slow: 0, moderate: 1, fast: 0 },
+                };
+            }
         }
 
         return weights;
@@ -393,9 +467,13 @@ const FaceZones = (() => {
 
     function getBruisingWeight(zoneData) {
         if (!zoneData) return 0;
-        if (zoneData.isBruiseZone) return zoneData.weight * 2.0; // amplify bruise in these zones
-        // Nose zones get mild bruising too
-        if (zoneData.zone.startsWith("nasal_") || zoneData.zone === "supratip") return zoneData.weight * 0.3;
+        // Use continuous bruiseBlend for smooth transitions between bruise/non-bruise zones
+        if (typeof zoneData.bruiseBlend === 'number') {
+            return zoneData.bruiseBlend * (zoneData.weight || 0);
+        }
+        // Legacy fallback for non-blended data
+        if (zoneData.isBruiseZone) return zoneData.weight * 2.0;
+        if (zoneData.zone && (zoneData.zone.startsWith("nasal_") || zoneData.zone === "supratip")) return zoneData.weight * 0.3;
         return 0;
     }
 
