@@ -62,9 +62,14 @@ async function initMediaPipe() {
             outputFaceBlendshapes: false,
         });
 
-        // Extract tesselation for mesh building
-        if (FaceLandmarker.FACE_LANDMARKS_TESSELATION) {
-            buildTrianglesFromEdges(FaceLandmarker.FACE_LANDMARKS_TESSELATION);
+        // Extract tessellation for mesh building (check both spellings)
+        const tessData = FaceLandmarker.FACE_LANDMARKS_TESSELATION
+                      || FaceLandmarker.FACE_LANDMARKS_TESSELLATION;
+        if (tessData && tessData.length > 0) {
+            buildTrianglesFromEdges(tessData);
+            console.log(`[MediaPipe] Tessellation found: ${tessData.length} edges`);
+        } else {
+            console.warn('[MediaPipe] No tessellation data found — will use fallback triangulation');
         }
 
         statusEl.textContent = 'Ready!';
@@ -309,10 +314,18 @@ function captureFace() {
         // Compute normals
         faceNormals = computeNormals(baseLandmarks);
 
-        // Build and show viewer
-        initViewer();
-        buildFaceMesh(0);
+        // CRITICAL: Show viewer screen FIRST so the container has layout dimensions
+        // (otherwise clientWidth/clientHeight are 0 and the canvas is invisible)
         showScreen('viewer');
+
+        // Wait for the browser to compute layout, then init 3D
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                initViewer();
+                buildFaceMesh(0);
+                autoCenterCamera();
+            });
+        });
     }, 500);
 }
 
@@ -327,9 +340,16 @@ function useSampleFace() {
         zoneWeights = FaceZones.computeZoneWeights(baseLandmarks);
         faceNormals = computeNormals(baseLandmarks);
 
-        initViewer();
-        buildFaceMesh(0);
+        // Show viewer FIRST so the container has layout dimensions
         showScreen('viewer');
+
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                initViewer();
+                buildFaceMesh(0);
+                autoCenterCamera();
+            });
+        });
     }, 500);
 }
 
@@ -380,6 +400,89 @@ function generateSampleFaceLandmarks() {
     points[168] = { x: 0, y: 0.04, z: 0.03 };          // glabella
 
     return points;
+}
+
+/**
+ * Fallback triangulation using simple 2D Delaunay-like approach.
+ * Projects landmarks to 2D (x,y) and creates triangles via a grid-based method.
+ */
+function buildFallbackTriangulation(landmarks) {
+    if (!landmarks || landmarks.length < 3) return null;
+
+    const n = landmarks.length;
+    const indices = [];
+
+    // Sort landmarks by x,y into a grid and connect nearby points
+    const sorted = landmarks.map((lm, i) => ({ x: lm.x, y: lm.y, z: lm.z, idx: i }));
+    sorted.sort((a, b) => a.y - b.y || a.x - b.x);
+
+    // Build a spatial hash for nearest-neighbor lookup
+    const cellSize = 0.008; // ~8mm cells
+    const grid = new Map();
+
+    for (const pt of sorted) {
+        const gx = Math.floor(pt.x / cellSize);
+        const gy = Math.floor(pt.y / cellSize);
+        const key = `${gx},${gy}`;
+        if (!grid.has(key)) grid.set(key, []);
+        grid.get(key).push(pt);
+    }
+
+    // For each point, find nearby points and form triangles
+    const seen = new Set();
+    for (const pt of sorted) {
+        const gx = Math.floor(pt.x / cellSize);
+        const gy = Math.floor(pt.y / cellSize);
+
+        const neighbors = [];
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                const key = `${gx + dx},${gy + dy}`;
+                const cell = grid.get(key);
+                if (cell) {
+                    for (const nb of cell) {
+                        if (nb.idx !== pt.idx) neighbors.push(nb);
+                    }
+                }
+            }
+        }
+
+        // Sort neighbors by distance
+        neighbors.sort((a, b) => {
+            const da = (a.x - pt.x) ** 2 + (a.y - pt.y) ** 2;
+            const db = (b.x - pt.x) ** 2 + (b.y - pt.y) ** 2;
+            return da - db;
+        });
+
+        // Take closest neighbors and form triangles
+        const closest = neighbors.slice(0, 8);
+        for (let i = 0; i < closest.length; i++) {
+            for (let j = i + 1; j < closest.length; j++) {
+                const tri = [pt.idx, closest[i].idx, closest[j].idx].sort((a, b) => a - b);
+                const key = `${tri[0]},${tri[1]},${tri[2]}`;
+                if (!seen.has(key)) {
+                    // Check that the triangle is not too degenerate (thin)
+                    const p0 = landmarks[tri[0]], p1 = landmarks[tri[1]], p2 = landmarks[tri[2]];
+                    const e1x = p1.x - p0.x, e1y = p1.y - p0.y;
+                    const e2x = p2.x - p0.x, e2y = p2.y - p0.y;
+                    const area = Math.abs(e1x * e2y - e1y * e2x);
+                    const maxEdge = Math.max(
+                        Math.sqrt(e1x * e1x + e1y * e1y),
+                        Math.sqrt(e2x * e2x + e2y * e2y),
+                        Math.sqrt((p2.x-p1.x)**2 + (p2.y-p1.y)**2)
+                    );
+                    // Skip degenerate or too-large triangles
+                    if (area > 1e-8 && maxEdge < cellSize * 3) {
+                        seen.add(key);
+                        indices.push(tri[0], tri[1], tri[2]);
+                    }
+                }
+            }
+        }
+    }
+
+    console.log(`[Fallback] Generated ${indices.length / 3} triangles`);
+    return indices.length > 0 ? indices : null;
 }
 
 /**
@@ -444,19 +547,26 @@ function initViewer() {
     // Clear previous
     while (container.firstChild) container.removeChild(container.firstChild);
 
+    // Fallback dimensions if container hasn't laid out yet
+    const w = container.clientWidth || window.innerWidth - 24;
+    const h = container.clientHeight || Math.round(window.innerHeight * 0.45);
+
+    console.log(`[Viewer] Init canvas: ${w}x${h}`);
+
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x111111);
+    scene.background = new THREE.Color(0x1a1a2e);
 
     // Camera
-    threeCamera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.001, 10);
-    threeCamera.position.set(0, 0, 0.3);
+    threeCamera = new THREE.PerspectiveCamera(45, w / h, 0.001, 10);
+    threeCamera.position.set(0, 0, 0.35);
 
     // Renderer
-    renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setSize(w, h);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.2;
+    renderer.toneMappingExposure = 1.4;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
 
     // Controls
@@ -464,32 +574,47 @@ function initViewer() {
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.target.set(0, 0, 0);
-    controls.minDistance = 0.1;
-    controls.maxDistance = 1;
+    controls.minDistance = 0.05;
+    controls.maxDistance = 2;
+    controls.enablePan = true;
 
-    // Lights
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    // Lights — stronger and more balanced for skin rendering
+    const keyLight = new THREE.DirectionalLight(0xfff5ee, 3.0);
     keyLight.position.set(0.3, 0.5, 1);
     scene.add(keyLight);
 
-    const fillLight = new THREE.DirectionalLight(0xaabbff, 0.8);
-    fillLight.position.set(-0.5, 0.2, 0.5);
+    const fillLight = new THREE.DirectionalLight(0xc8d8ff, 1.2);
+    fillLight.position.set(-0.5, 0.2, 0.8);
     scene.add(fillLight);
 
-    const rimLight = new THREE.DirectionalLight(0xffddcc, 0.5);
+    const rimLight = new THREE.DirectionalLight(0xffddcc, 0.8);
     rimLight.position.set(0, -0.3, -0.5);
     scene.add(rimLight);
 
-    scene.add(new THREE.AmbientLight(0x333333, 0.5));
+    const topLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    topLight.position.set(0, 1, 0.3);
+    scene.add(topLight);
+
+    scene.add(new THREE.AmbientLight(0x555566, 1.0));
+    scene.add(new THREE.HemisphereLight(0xffeedd, 0x333344, 0.8));
 
     // Resize handler
-    window.addEventListener('resize', () => {
-        const w = container.clientWidth;
-        const h = container.clientHeight;
-        threeCamera.aspect = w / h;
-        threeCamera.updateProjectionMatrix();
-        renderer.setSize(w, h);
-    });
+    const resizeViewer = () => {
+        const rw = container.clientWidth;
+        const rh = container.clientHeight;
+        if (rw > 0 && rh > 0) {
+            threeCamera.aspect = rw / rh;
+            threeCamera.updateProjectionMatrix();
+            renderer.setSize(rw, rh);
+        }
+    };
+    window.addEventListener('resize', resizeViewer);
+
+    // Also use ResizeObserver for when the container becomes visible
+    if (typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(() => resizeViewer());
+        ro.observe(container);
+    }
 
     // Render loop
     function animate() {
@@ -498,6 +623,43 @@ function initViewer() {
         renderer.render(scene, threeCamera);
     }
     animate();
+
+    console.log('[Viewer] Three.js scene initialized');
+}
+
+/**
+ * Auto-center and fit the camera to show the face mesh.
+ */
+function autoCenterCamera() {
+    if (!baseLandmarks || !threeCamera || !controls) return;
+
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+
+    for (const lm of baseLandmarks) {
+        minX = Math.min(minX, lm.x); maxX = Math.max(maxX, lm.x);
+        minY = Math.min(minY, lm.y); maxY = Math.max(maxY, lm.y);
+        minZ = Math.min(minZ, lm.z); maxZ = Math.max(maxZ, lm.z);
+    }
+
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const cz = (minZ + maxZ) / 2;
+
+    const sizeX = maxX - minX;
+    const sizeY = maxY - minY;
+    const maxSize = Math.max(sizeX, sizeY);
+
+    // Position camera to see the full face with some margin
+    const fovRad = threeCamera.fov * (Math.PI / 180);
+    const distance = (maxSize / 2) / Math.tan(fovRad / 2) * 1.6;
+
+    threeCamera.position.set(cx, cy, cz + Math.max(distance, 0.15));
+    controls.target.set(cx, cy, cz);
+    controls.update();
+
+    console.log(`[Camera] Auto-centered on mesh — center: (${cx.toFixed(4)}, ${cy.toFixed(4)}, ${cz.toFixed(4)}), dist: ${distance.toFixed(4)}, face size: ${maxSize.toFixed(4)}`);
 }
 
 /**
@@ -589,30 +751,56 @@ function buildFaceMesh(day) {
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals3, 3));
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-    if (triangleIndices && triangleIndices.length > 0) {
+    const hasTriangles = triangleIndices && triangleIndices.length > 0;
+
+    if (hasTriangles) {
         // Solid mesh with triangles
         geometry.setIndex(new THREE.BufferAttribute(triangleIndices, 1));
+        geometry.computeVertexNormals(); // Recompute normals from triangles for correct lighting
 
         const material = new THREE.MeshStandardMaterial({
             vertexColors: true,
-            roughness: 0.65,
-            metalness: 0.0,
+            roughness: 0.55,
+            metalness: 0.02,
             side: THREE.DoubleSide,
             flatShading: false,
+            envMapIntensity: 0.3,
         });
 
         faceMesh = new THREE.Mesh(geometry, material);
         faceMesh.name = 'faceMesh';
         scene.add(faceMesh);
+        console.log(`[Mesh] Built solid mesh with ${triangleIndices.length / 3} triangles`);
+    } else {
+        // No triangles available — try to build a simple triangulation from 2D projection
+        console.warn('[Mesh] No triangle indices available, building fallback triangulation...');
+        const fallbackIndices = buildFallbackTriangulation(baseLandmarks);
+        if (fallbackIndices && fallbackIndices.length > 0) {
+            geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(fallbackIndices), 1));
+            geometry.computeVertexNormals();
+
+            const material = new THREE.MeshStandardMaterial({
+                vertexColors: true,
+                roughness: 0.55,
+                metalness: 0.02,
+                side: THREE.DoubleSide,
+                flatShading: true,
+            });
+
+            faceMesh = new THREE.Mesh(geometry, material);
+            faceMesh.name = 'faceMesh';
+            scene.add(faceMesh);
+            console.log(`[Mesh] Built fallback mesh with ${fallbackIndices.length / 3} triangles`);
+        }
     }
 
-    // Always add point cloud (visible through mesh or standalone)
+    // Always add point cloud — larger size when no mesh
     const pointGeometry = new THREE.BufferGeometry();
     pointGeometry.setAttribute('position', new THREE.BufferAttribute(positions.slice(), 3));
     pointGeometry.setAttribute('color', new THREE.BufferAttribute(colors.slice(), 3));
 
     const pointMaterial = new THREE.PointsMaterial({
-        size: triangleIndices ? 0.001 : 0.003,
+        size: hasTriangles ? 0.0015 : 0.005,
         vertexColors: true,
         sizeAttenuation: true,
     });
