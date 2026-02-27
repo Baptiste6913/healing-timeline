@@ -1,11 +1,11 @@
 /**
  * app.js — Main application: MediaPipe face capture + Three.js 3D viewer + timeline.
  *
- * ES Module. Imports Three.js and MediaPipe from CDN.
- * Uses FaceZones and HealingModelJS from global scope (loaded via script tags).
- *
- * KEY FEATURE: Captures camera frame as texture and maps it onto the 3D face mesh
- * so the user sees their actual face in 3D, with healing simulation overlaid.
+ * KEY FEATURES:
+ * - Captures camera frame as texture and UV-maps it onto the 3D face mesh
+ * - Subdivides the 468-point MediaPipe mesh for smooth surface (~2000 vertices)
+ * - Applies Laplacian smoothing for natural-looking geometry
+ * - Healing simulation (swelling deformation + bruise color overlay) on top of texture
  */
 
 import * as THREE from 'three';
@@ -26,13 +26,13 @@ let zoneWeights = null;
 // Three.js
 let scene, threeCamera, renderer, controls;
 let faceMesh = null;
-let baseLandmarks = null;  // original positions for deformation
+let baseLandmarks = null;
 let faceNormals = null;
 let triangleIndices = null;
 
 // Face texture from camera
-let capturedTexture = null;   // THREE.CanvasTexture from camera frame
-let capturedUVs = null;       // Original 2D landmark positions for UV mapping
+let capturedTexture = null;
+let capturedUVs = null;
 
 // Model
 let healingModel = new HealingModelJS.HealingModel();
@@ -74,14 +74,13 @@ async function initMediaPipe() {
                       || FaceLandmarker.FACE_LANDMARKS_TESSELLATION;
         if (tessData && tessData.length > 0) {
             buildTrianglesFromEdges(tessData);
-            console.log(`[MediaPipe] Tessellation found: ${tessData.length} edges`);
+            console.log(`[MediaPipe] Tessellation: ${tessData.length} edges → ${triangleIndices ? triangleIndices.length / 3 : 0} triangles`);
         } else {
-            console.warn('[MediaPipe] No tessellation data found — will use fallback triangulation');
+            console.warn('[MediaPipe] No tessellation data — will use fallback');
         }
 
         statusEl.textContent = 'Ready!';
         document.getElementById('start-btn').disabled = false;
-        console.log('[MediaPipe] FaceLandmarker ready. Triangles:', triangleIndices ? triangleIndices.length / 3 : 'fallback');
     } catch (err) {
         console.error('[MediaPipe] Init failed:', err);
         statusEl.textContent = 'Failed to load model. Check internet connection.';
@@ -90,7 +89,6 @@ async function initMediaPipe() {
 
 /**
  * Convert FACE_LANDMARKS_TESSELATION edges into triangle indices.
- * Algorithm: for each edge (a,b), find common neighbors c to form triangles.
  */
 function buildTrianglesFromEdges(edges) {
     const adj = new Map();
@@ -105,12 +103,12 @@ function buildTrianglesFromEdges(edges) {
     const tris = [];
 
     for (const { start: a, end: b } of edges) {
-        const neighborsA = adj.get(a);
-        const neighborsB = adj.get(b);
-        if (!neighborsA || !neighborsB) continue;
+        const nA = adj.get(a);
+        const nB = adj.get(b);
+        if (!nA || !nB) continue;
 
-        for (const c of neighborsA) {
-            if (neighborsB.has(c)) {
+        for (const c of nA) {
+            if (nB.has(c)) {
                 const tri = [a, b, c].sort((x, y) => x - y);
                 const key = `${tri[0]},${tri[1]},${tri[2]}`;
                 if (!seen.has(key)) {
@@ -122,7 +120,7 @@ function buildTrianglesFromEdges(edges) {
     }
 
     triangleIndices = new Uint32Array(tris);
-    console.log(`[Mesh] Computed ${tris.length / 3} triangles from ${edges.length} edges`);
+    console.log(`[Mesh] ${tris.length / 3} triangles from ${edges.length} edges`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -135,9 +133,7 @@ async function startCamera() {
     const ctx = canvas.getContext('2d');
     const instructionEl = document.getElementById('scan-instruction');
 
-    // Check secure context (camera requires HTTPS or localhost)
     if (!window.isSecureContext || !navigator.mediaDevices) {
-        console.warn('[Camera] Not a secure context — camera unavailable');
         showCameraError(instructionEl, 'Camera requires HTTPS. Use localhost or enable HTTPS.');
         return;
     }
@@ -151,8 +147,6 @@ async function startCamera() {
 
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
-
-        // Start detection loop
         detectLoop(video, canvas, ctx);
     } catch (err) {
         console.error('[Camera]', err);
@@ -168,17 +162,11 @@ async function startCamera() {
     }
 }
 
-/**
- * Show camera error with a fallback button to use demo mode.
- */
 function showCameraError(instructionEl, message) {
     const bottomEl = document.querySelector('.scan-bottom');
     instructionEl.textContent = message;
-
-    // Hide the capture button
     document.getElementById('capture-btn').style.display = 'none';
 
-    // Add fallback button if not already present
     if (!document.getElementById('camera-fallback-btn')) {
         const fallbackBtn = document.createElement('button');
         fallbackBtn.id = 'camera-fallback-btn';
@@ -186,11 +174,7 @@ function showCameraError(instructionEl, message) {
         fallbackBtn.textContent = 'Use Demo Mode Instead';
         fallbackBtn.style.maxWidth = '260px';
         fallbackBtn.addEventListener('click', () => {
-            // Cleanup
-            if (videoStream) {
-                videoStream.getTracks().forEach(t => t.stop());
-                videoStream = null;
-            }
+            if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
             useSampleFace();
         });
         bottomEl.appendChild(fallbackBtn);
@@ -202,14 +186,12 @@ function detectLoop(video, canvas, ctx) {
 
     if (faceLandmarker && video.readyState >= 2) {
         const results = faceLandmarker.detectForVideo(video, performance.now());
-
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
         if (results.faceLandmarks && results.faceLandmarks.length > 0) {
             const landmarks = results.faceLandmarks[0];
             drawLandmarks(ctx, landmarks, canvas.width, canvas.height);
             updateTrackingUI(true);
-            // Store for capture
             capturedLandmarks = landmarks;
         } else {
             updateTrackingUI(false);
@@ -254,15 +236,13 @@ function drawLandmarks(ctx, landmarks, w, h) {
         ctx.fill();
     }
 
-    // Draw nose tip crosshair
+    // Nose tip crosshair
     const tip = landmarks[1];
-    const tx = tip.x * w;
-    const ty = tip.y * h;
     ctx.strokeStyle = '#ff3333';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(tx - 8, ty); ctx.lineTo(tx + 8, ty);
-    ctx.moveTo(tx, ty - 8); ctx.lineTo(tx, ty + 8);
+    ctx.moveTo(tip.x * w - 8, tip.y * h); ctx.lineTo(tip.x * w + 8, tip.y * h);
+    ctx.moveTo(tip.x * w, tip.y * h - 8); ctx.lineTo(tip.x * w, tip.y * h + 8);
     ctx.stroke();
 }
 
@@ -294,66 +274,200 @@ function updateTrackingUI(detected) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// MESH SUBDIVISION + SMOOTHING
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Subdivide a triangle mesh by splitting each triangle into 4.
+ * Creates midpoint vertices on each edge with interpolated UVs and weights.
+ * Result: ~4x triangles, ~2x vertices → much smoother surface.
+ */
+function subdivideMesh(landmarks, indices, uvData, weights) {
+    const edgeMap = new Map();
+    const newLandmarks = landmarks.map(lm => ({ ...lm }));
+    const newUVs = uvData ? uvData.map(uv => ({ ...uv })) : null;
+    const newWeights = weights.map(w => ({ ...w, color: [...w.color] }));
+    const newIndices = [];
+
+    function getMidpoint(i0, i1) {
+        const key = `${Math.min(i0, i1)},${Math.max(i0, i1)}`;
+        if (edgeMap.has(key)) return edgeMap.get(key);
+
+        const idx = newLandmarks.length;
+        const l0 = landmarks[i0], l1 = landmarks[i1];
+
+        // Interpolate position
+        newLandmarks.push({
+            x: (l0.x + l1.x) / 2,
+            y: (l0.y + l1.y) / 2,
+            z: (l0.z + l1.z) / 2,
+        });
+
+        // Interpolate UV
+        if (newUVs && uvData[i0] && uvData[i1]) {
+            newUVs.push({
+                u: (uvData[i0].u + uvData[i1].u) / 2,
+                v: (uvData[i0].v + uvData[i1].v) / 2,
+            });
+        } else if (newUVs) {
+            newUVs.push({ u: 0.5, v: 0.5 });
+        }
+
+        // Interpolate zone weight
+        const w0 = weights[i0], w1 = weights[i1];
+        newWeights.push({
+            zone: w0.weight >= w1.weight ? w0.zone : w1.zone,
+            weight: (w0.weight + w1.weight) / 2,
+            color: [
+                (w0.color[0] + w1.color[0]) / 2,
+                (w0.color[1] + w1.color[1]) / 2,
+                (w0.color[2] + w1.color[2]) / 2,
+            ],
+            isBruiseZone: w0.isBruiseZone || w1.isBruiseZone,
+        });
+
+        edgeMap.set(key, idx);
+        return idx;
+    }
+
+    for (let t = 0; t < indices.length; t += 3) {
+        const i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
+        if (i0 >= landmarks.length || i1 >= landmarks.length || i2 >= landmarks.length) continue;
+
+        const m01 = getMidpoint(i0, i1);
+        const m12 = getMidpoint(i1, i2);
+        const m02 = getMidpoint(i0, i2);
+
+        newIndices.push(i0, m01, m02);
+        newIndices.push(m01, i1, m12);
+        newIndices.push(m02, m12, i2);
+        newIndices.push(m01, m12, m02);
+    }
+
+    console.log(`[Subdivide] ${landmarks.length} → ${newLandmarks.length} vertices, ${indices.length / 3} → ${newIndices.length / 3} triangles`);
+
+    return {
+        landmarks: newLandmarks,
+        indices: new Uint32Array(newIndices),
+        uvs: newUVs,
+        weights: newWeights,
+    };
+}
+
+/**
+ * Laplacian smoothing: moves each vertex toward the average of its neighbors.
+ * Produces smoother, more natural-looking surfaces without changing topology.
+ */
+function smoothMesh(landmarks, indices, iterations = 2, factor = 0.3) {
+    // Build adjacency
+    const adj = new Map();
+    for (let t = 0; t < indices.length; t += 3) {
+        const verts = [indices[t], indices[t + 1], indices[t + 2]];
+        for (let i = 0; i < 3; i++) {
+            for (let j = i + 1; j < 3; j++) {
+                if (!adj.has(verts[i])) adj.set(verts[i], new Set());
+                if (!adj.has(verts[j])) adj.set(verts[j], new Set());
+                adj.get(verts[i]).add(verts[j]);
+                adj.get(verts[j]).add(verts[i]);
+            }
+        }
+    }
+
+    let current = landmarks;
+    for (let iter = 0; iter < iterations; iter++) {
+        const smoothed = current.map((lm, i) => {
+            const neighbors = adj.get(i);
+            if (!neighbors || neighbors.size === 0) return { ...lm };
+
+            let sx = 0, sy = 0, sz = 0;
+            for (const n of neighbors) {
+                sx += current[n].x;
+                sy += current[n].y;
+                sz += current[n].z;
+            }
+            const c = neighbors.size;
+            return {
+                x: lm.x * (1 - factor) + (sx / c) * factor,
+                y: lm.y * (1 - factor) + (sy / c) * factor,
+                z: lm.z * (1 - factor) + (sz / c) * factor,
+            };
+        });
+        current = smoothed;
+    }
+
+    return current;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CAPTURE + MESH CONSTRUCTION
 // ═══════════════════════════════════════════════════════════════════════════
 
 function captureFace() {
     if (!capturedLandmarks) return;
 
-    // ─── Capture video frame as texture BEFORE stopping the camera ───
+    // ─── Capture video frame as texture BEFORE stopping camera ───
     const video = document.getElementById('camera-video');
     const texCanvas = document.createElement('canvas');
     texCanvas.width = video.videoWidth || 640;
     texCanvas.height = video.videoHeight || 480;
     const texCtx = texCanvas.getContext('2d');
 
-    // Draw the video frame (mirrored to match what user sees)
-    texCtx.translate(texCanvas.width, 0);
-    texCtx.scale(-1, 1);
+    // Draw raw video frame (no mirror — UV mapping handles coordinates directly)
     texCtx.drawImage(video, 0, 0, texCanvas.width, texCanvas.height);
 
-    // Create Three.js texture from captured frame
     capturedTexture = new THREE.CanvasTexture(texCanvas);
     capturedTexture.colorSpace = THREE.SRGBColorSpace;
     capturedTexture.minFilter = THREE.LinearFilter;
     capturedTexture.magFilter = THREE.LinearFilter;
     capturedTexture.generateMipmaps = false;
 
-    // Store original 2D positions as UV coordinates
-    // Since we mirrored the texture, u = 1 - lm.x to match
+    // UV coordinates = original 2D landmark positions (direct mapping to raw frame)
     capturedUVs = capturedLandmarks.map(lm => ({
-        u: 1.0 - lm.x,   // mirror x to match mirrored texture
-        v: 1.0 - lm.y     // flip y (Three.js v goes bottom-to-top)
+        u: lm.x,           // direct x mapping to texture
+        v: 1.0 - lm.y      // flip y (Three.js v goes bottom-to-top)
     }));
 
-    console.log(`[Capture] Video frame captured: ${texCanvas.width}x${texCanvas.height}, UVs computed for ${capturedUVs.length} landmarks`);
+    console.log(`[Capture] Frame: ${texCanvas.width}x${texCanvas.height}, UVs: ${capturedUVs.length}`);
 
     // Stop camera
-    if (videoStream) {
-        videoStream.getTracks().forEach(t => t.stop());
-        videoStream = null;
-    }
+    if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
 
     showScreen('processing');
 
-    // Process asynchronously
     setTimeout(() => {
+        // Convert landmarks to 3D coordinates
         baseLandmarks = capturedLandmarks.map(lm => ({
-            x: (lm.x - 0.5) * 0.2,    // center and scale to ~20cm
-            y: -(lm.y - 0.5) * 0.2,    // flip Y (MediaPipe Y is top-down)
-            z: -lm.z * 0.2              // Z: depth
+            x: (lm.x - 0.5) * 0.2,
+            y: -(lm.y - 0.5) * 0.2,
+            z: -lm.z * 0.3        // increased depth scale for better 3D relief
         }));
 
-        // Compute zone weights
+        // Compute zone weights on original 468 landmarks
         zoneWeights = FaceZones.computeZoneWeights(baseLandmarks);
 
-        // Compute normals
+        // Ensure we have triangle indices (tessellation or fallback)
+        if (!triangleIndices || triangleIndices.length === 0) {
+            const fallback = buildFallbackTriangulation(baseLandmarks);
+            if (fallback) triangleIndices = new Uint32Array(fallback);
+        }
+
+        // ─── SUBDIVIDE for smoother mesh ───
+        if (triangleIndices && triangleIndices.length > 0) {
+            const sub = subdivideMesh(baseLandmarks, triangleIndices, capturedUVs, zoneWeights);
+            baseLandmarks = sub.landmarks;
+            triangleIndices = sub.indices;
+            capturedUVs = sub.uvs;
+            zoneWeights = sub.weights;
+
+            // Laplacian smoothing for natural surface
+            baseLandmarks = smoothMesh(baseLandmarks, triangleIndices, 2, 0.25);
+        }
+
+        // Compute normals on subdivided + smoothed mesh
         faceNormals = computeNormals(baseLandmarks);
 
-        // Show viewer FIRST so the container has layout dimensions
+        // Show viewer, then init 3D
         showScreen('viewer');
-
-        // Wait for the browser to compute layout, then init 3D
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
                 initViewer();
@@ -361,14 +475,10 @@ function captureFace() {
                 autoCenterCamera();
             });
         });
-    }, 500);
+    }, 600);
 }
 
-/**
- * Use sample/generated face for demo mode (no camera needed).
- */
 function useSampleFace() {
-    // No texture in demo mode
     capturedTexture = null;
     capturedUVs = null;
 
@@ -377,11 +487,25 @@ function useSampleFace() {
     setTimeout(() => {
         baseLandmarks = generateSampleFaceLandmarks();
         zoneWeights = FaceZones.computeZoneWeights(baseLandmarks);
+
+        // Ensure triangles
+        if (!triangleIndices || triangleIndices.length === 0) {
+            const fallback = buildFallbackTriangulation(baseLandmarks);
+            if (fallback) triangleIndices = new Uint32Array(fallback);
+        }
+
+        // Subdivide
+        if (triangleIndices && triangleIndices.length > 0) {
+            const sub = subdivideMesh(baseLandmarks, triangleIndices, null, zoneWeights);
+            baseLandmarks = sub.landmarks;
+            triangleIndices = sub.indices;
+            zoneWeights = sub.weights;
+            baseLandmarks = smoothMesh(baseLandmarks, triangleIndices, 2, 0.25);
+        }
+
         faceNormals = computeNormals(baseLandmarks);
 
-        // Show viewer FIRST so the container has layout dimensions
         showScreen('viewer');
-
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
                 initViewer();
@@ -389,76 +513,62 @@ function useSampleFace() {
                 autoCenterCamera();
             });
         });
-    }, 500);
+    }, 600);
 }
 
-/**
- * Generate 468 synthetic face landmarks (no real data).
- */
 function generateSampleFaceLandmarks() {
     const points = [];
     for (let i = 0; i < 468; i++) {
-        // Distribute points in a face-like ellipsoid
         const t = i / 467;
-        const angle = t * Math.PI * 15.7; // golden angle spiral
+        const angle = t * Math.PI * 15.7;
         const r = Math.sqrt(t) * 0.08;
 
         let x = r * Math.cos(angle);
-        let y = r * Math.sin(angle) * 1.3 - 0.01; // slightly taller
-        let z = 0.02 * Math.cos(t * Math.PI); // slight depth
+        let y = r * Math.sin(angle) * 1.3 - 0.01;
+        let z = 0.02 * Math.cos(t * Math.PI);
 
-        // Add nose protrusion for landmarks in nose zone
         if (FaceZones.ALL_NOSE_LANDMARKS.has(i)) {
             z += 0.02;
-            // Tip landmarks protrude more
-            if (i === 1 || i === 2 || i === 4) {
-                z += 0.015;
-                y -= 0.005;
-            }
+            if (i === 1 || i === 2 || i === 4) { z += 0.015; y -= 0.005; }
         }
 
         points.push({ x, y, z });
     }
 
-    // Override key landmarks for anatomical accuracy
-    points[1]   = { x: 0, y: -0.015, z: 0.05 };       // nose tip
-    points[6]   = { x: 0, y: 0.025, z: 0.035 };        // nasion
-    points[4]   = { x: 0, y: -0.005, z: 0.045 };       // supratip
-    points[5]   = { x: 0, y: 0.005, z: 0.04 };         // mid-dorsum
-    points[2]   = { x: 0, y: -0.025, z: 0.04 };        // columella
-    points[164] = { x: 0, y: -0.03, z: 0.035 };        // subnasale
-    points[48]  = { x: -0.015, y: -0.015, z: 0.035 };  // left alar
-    points[278] = { x: 0.015, y: -0.015, z: 0.035 };   // right alar
-    points[60]  = { x: -0.008, y: -0.02, z: 0.038 };   // left nostril
-    points[290] = { x: 0.008, y: -0.02, z: 0.038 };    // right nostril
-    points[133] = { x: -0.025, y: 0.015, z: 0.02 };    // left eye inner
-    points[362] = { x: 0.025, y: 0.015, z: 0.02 };     // right eye inner
-    points[116] = { x: -0.022, y: 0.005, z: 0.025 };   // left infraorbital
-    points[345] = { x: 0.022, y: 0.005, z: 0.025 };    // right infraorbital
-    points[152] = { x: 0, y: -0.07, z: 0.01 };         // chin
-    points[168] = { x: 0, y: 0.04, z: 0.03 };          // glabella
+    points[1]   = { x: 0, y: -0.015, z: 0.05 };
+    points[6]   = { x: 0, y: 0.025, z: 0.035 };
+    points[4]   = { x: 0, y: -0.005, z: 0.045 };
+    points[5]   = { x: 0, y: 0.005, z: 0.04 };
+    points[2]   = { x: 0, y: -0.025, z: 0.04 };
+    points[164] = { x: 0, y: -0.03, z: 0.035 };
+    points[48]  = { x: -0.015, y: -0.015, z: 0.035 };
+    points[278] = { x: 0.015, y: -0.015, z: 0.035 };
+    points[60]  = { x: -0.008, y: -0.02, z: 0.038 };
+    points[290] = { x: 0.008, y: -0.02, z: 0.038 };
+    points[133] = { x: -0.025, y: 0.015, z: 0.02 };
+    points[362] = { x: 0.025, y: 0.015, z: 0.02 };
+    points[116] = { x: -0.022, y: 0.005, z: 0.025 };
+    points[345] = { x: 0.022, y: 0.005, z: 0.025 };
+    points[152] = { x: 0, y: -0.07, z: 0.01 };
+    points[168] = { x: 0, y: 0.04, z: 0.03 };
 
     return points;
 }
 
 /**
- * Fallback triangulation using simple 2D Delaunay-like approach.
- * Projects landmarks to 2D (x,y) and creates triangles via a grid-based method.
+ * Fallback triangulation using spatial hashing.
  */
 function buildFallbackTriangulation(landmarks) {
     if (!landmarks || landmarks.length < 3) return null;
 
     const indices = [];
-    const sorted = landmarks.map((lm, i) => ({ x: lm.x, y: lm.y, z: lm.z, idx: i }));
+    const sorted = landmarks.map((lm, i) => ({ x: lm.x, y: lm.y, idx: i }));
     sorted.sort((a, b) => a.y - b.y || a.x - b.x);
 
     const cellSize = 0.008;
     const grid = new Map();
-
     for (const pt of sorted) {
-        const gx = Math.floor(pt.x / cellSize);
-        const gy = Math.floor(pt.y / cellSize);
-        const key = `${gx},${gy}`;
+        const key = `${Math.floor(pt.x / cellSize)},${Math.floor(pt.y / cellSize)}`;
         if (!grid.has(key)) grid.set(key, []);
         grid.get(key).push(pt);
     }
@@ -471,21 +581,14 @@ function buildFallbackTriangulation(landmarks) {
         const neighbors = [];
         for (let dx = -1; dx <= 1; dx++) {
             for (let dy = -1; dy <= 1; dy++) {
-                const key = `${gx + dx},${gy + dy}`;
-                const cell = grid.get(key);
-                if (cell) {
-                    for (const nb of cell) {
-                        if (nb.idx !== pt.idx) neighbors.push(nb);
-                    }
-                }
+                const cell = grid.get(`${gx + dx},${gy + dy}`);
+                if (cell) for (const nb of cell) if (nb.idx !== pt.idx) neighbors.push(nb);
             }
         }
 
-        neighbors.sort((a, b) => {
-            const da = (a.x - pt.x) ** 2 + (a.y - pt.y) ** 2;
-            const db = (b.x - pt.x) ** 2 + (b.y - pt.y) ** 2;
-            return da - db;
-        });
+        neighbors.sort((a, b) =>
+            ((a.x - pt.x) ** 2 + (a.y - pt.y) ** 2) - ((b.x - pt.x) ** 2 + (b.y - pt.y) ** 2)
+        );
 
         const closest = neighbors.slice(0, 8);
         for (let i = 0; i < closest.length; i++) {
@@ -497,12 +600,11 @@ function buildFallbackTriangulation(landmarks) {
                     const e1x = p1.x - p0.x, e1y = p1.y - p0.y;
                     const e2x = p2.x - p0.x, e2y = p2.y - p0.y;
                     const area = Math.abs(e1x * e2y - e1y * e2x);
-                    const maxEdge = Math.max(
-                        Math.sqrt(e1x * e1x + e1y * e1y),
-                        Math.sqrt(e2x * e2x + e2y * e2y),
-                        Math.sqrt((p2.x-p1.x)**2 + (p2.y-p1.y)**2)
+                    const maxE = Math.max(
+                        Math.hypot(e1x, e1y), Math.hypot(e2x, e2y),
+                        Math.hypot(p2.x - p1.x, p2.y - p1.y)
                     );
-                    if (area > 1e-8 && maxEdge < cellSize * 3) {
+                    if (area > 1e-8 && maxE < cellSize * 3) {
                         seen.add(key);
                         indices.push(tri[0], tri[1], tri[2]);
                     }
@@ -510,8 +612,6 @@ function buildFallbackTriangulation(landmarks) {
             }
         }
     }
-
-    console.log(`[Fallback] Generated ${indices.length / 3} triangles`);
     return indices.length > 0 ? indices : null;
 }
 
@@ -521,19 +621,14 @@ function buildFallbackTriangulation(landmarks) {
 function computeNormals(landmarks) {
     const normals = landmarks.map(() => ({ x: 0, y: 0, z: 0 }));
 
-    if (triangleIndices) {
+    if (triangleIndices && triangleIndices.length > 0) {
         for (let t = 0; t < triangleIndices.length; t += 3) {
-            const i0 = triangleIndices[t];
-            const i1 = triangleIndices[t + 1];
-            const i2 = triangleIndices[t + 2];
-
+            const i0 = triangleIndices[t], i1 = triangleIndices[t + 1], i2 = triangleIndices[t + 2];
             if (i0 >= landmarks.length || i1 >= landmarks.length || i2 >= landmarks.length) continue;
 
             const v0 = landmarks[i0], v1 = landmarks[i1], v2 = landmarks[i2];
-
             const e1x = v1.x - v0.x, e1y = v1.y - v0.y, e1z = v1.z - v0.z;
             const e2x = v2.x - v0.x, e2y = v2.y - v0.y, e2z = v2.z - v0.z;
-
             const nx = e1y * e2z - e1z * e2y;
             const ny = e1z * e2x - e1x * e2z;
             const nz = e1x * e2y - e1y * e2x;
@@ -542,7 +637,6 @@ function computeNormals(landmarks) {
             normals[i1].x += nx; normals[i1].y += ny; normals[i1].z += nz;
             normals[i2].x += nx; normals[i2].y += ny; normals[i2].z += nz;
         }
-
         for (const n of normals) {
             const len = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
             if (len > 1e-8) { n.x /= len; n.y /= len; n.z /= len; }
@@ -553,14 +647,11 @@ function computeNormals(landmarks) {
         for (const lm of landmarks) { cx += lm.x; cy += lm.y; cz += lm.z; }
         cx /= landmarks.length; cy /= landmarks.length; cz /= landmarks.length;
         for (let i = 0; i < landmarks.length; i++) {
-            const dx = landmarks[i].x - cx;
-            const dy = landmarks[i].y - cy;
-            const dz = landmarks[i].z - cz;
-            const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
-            normals[i] = { x: dx/len, y: dy/len, z: dz/len };
+            const dx = landmarks[i].x - cx, dy = landmarks[i].y - cy, dz = landmarks[i].z - cz;
+            const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            normals[i] = len > 0 ? { x: dx / len, y: dy / len, z: dz / len } : { x: 0, y: 0, z: 1 };
         }
     }
-
     return normals;
 }
 
@@ -575,27 +666,20 @@ function initViewer() {
     const w = container.clientWidth || window.innerWidth - 24;
     const h = container.clientHeight || Math.round(window.innerHeight * 0.45);
 
-    console.log(`[Viewer] Init canvas: ${w}x${h}`);
-
     scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x16162a);
 
-    // Gradient background
-    scene.background = new THREE.Color(0x1a1a2e);
-
-    // Camera
-    threeCamera = new THREE.PerspectiveCamera(45, w / h, 0.001, 10);
+    threeCamera = new THREE.PerspectiveCamera(40, w / h, 0.001, 10);
     threeCamera.position.set(0, 0, 0.35);
 
-    // Renderer
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.2;
+    renderer.toneMappingExposure = 1.1;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
 
-    // Controls
     controls = new OrbitControls(threeCamera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
@@ -604,35 +688,28 @@ function initViewer() {
     controls.maxDistance = 2;
     controls.enablePan = true;
 
-    // Lighting — optimized for face texture rendering
-    // Key light (main illumination from front-right)
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2.0);
-    keyLight.position.set(0.3, 0.4, 1);
-    scene.add(keyLight);
+    // Lighting — even, soft illumination to show the face texture naturally
+    const front = new THREE.DirectionalLight(0xffffff, 1.8);
+    front.position.set(0, 0.2, 1);
+    scene.add(front);
 
-    // Fill light (softer, from front-left, to reduce shadows)
-    const fillLight = new THREE.DirectionalLight(0xe8e8ff, 1.0);
-    fillLight.position.set(-0.4, 0.2, 0.8);
-    scene.add(fillLight);
+    const left = new THREE.DirectionalLight(0xffffff, 1.0);
+    left.position.set(-0.6, 0.3, 0.7);
+    scene.add(left);
 
-    // Top light (subtle overhead)
-    const topLight = new THREE.DirectionalLight(0xffffff, 0.5);
-    topLight.position.set(0, 1, 0.3);
-    scene.add(topLight);
+    const right = new THREE.DirectionalLight(0xffffff, 1.0);
+    right.position.set(0.6, 0.3, 0.7);
+    scene.add(right);
 
-    // Rim light from behind (subtle edge definition)
-    const rimLight = new THREE.DirectionalLight(0xffddcc, 0.3);
-    rimLight.position.set(0, -0.2, -0.5);
-    scene.add(rimLight);
+    const top = new THREE.DirectionalLight(0xffffff, 0.5);
+    top.position.set(0, 1, 0.2);
+    scene.add(top);
 
-    // Strong ambient + hemisphere for even base illumination
-    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-    scene.add(new THREE.HemisphereLight(0xffeedd, 0x444466, 0.5));
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444466, 0.4));
 
-    // Resize handler
     const resizeViewer = () => {
-        const rw = container.clientWidth;
-        const rh = container.clientHeight;
+        const rw = container.clientWidth, rh = container.clientHeight;
         if (rw > 0 && rh > 0) {
             threeCamera.aspect = rw / rh;
             threeCamera.updateProjectionMatrix();
@@ -640,26 +717,17 @@ function initViewer() {
         }
     };
     window.addEventListener('resize', resizeViewer);
-
     if (typeof ResizeObserver !== 'undefined') {
-        const ro = new ResizeObserver(() => resizeViewer());
-        ro.observe(container);
+        new ResizeObserver(resizeViewer).observe(container);
     }
 
-    // Render loop
-    function animate() {
+    (function animate() {
         requestAnimationFrame(animate);
         controls.update();
         renderer.render(scene, threeCamera);
-    }
-    animate();
-
-    console.log('[Viewer] Three.js scene initialized');
+    })();
 }
 
-/**
- * Auto-center and fit the camera to show the face mesh.
- */
 function autoCenterCamera() {
     if (!baseLandmarks || !threeCamera || !controls) return;
 
@@ -668,33 +736,22 @@ function autoCenterCamera() {
     let minZ = Infinity, maxZ = -Infinity;
 
     for (const lm of baseLandmarks) {
-        minX = Math.min(minX, lm.x); maxX = Math.max(maxX, lm.x);
-        minY = Math.min(minY, lm.y); maxY = Math.max(maxY, lm.y);
-        minZ = Math.min(minZ, lm.z); maxZ = Math.max(maxZ, lm.z);
+        if (lm.x < minX) minX = lm.x; if (lm.x > maxX) maxX = lm.x;
+        if (lm.y < minY) minY = lm.y; if (lm.y > maxY) maxY = lm.y;
+        if (lm.z < minZ) minZ = lm.z; if (lm.z > maxZ) maxZ = lm.z;
     }
 
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-    const cz = (minZ + maxZ) / 2;
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+    const maxSize = Math.max(maxX - minX, maxY - minY);
+    const dist = (maxSize / 2) / Math.tan(threeCamera.fov * Math.PI / 360) * 1.4;
 
-    const sizeX = maxX - minX;
-    const sizeY = maxY - minY;
-    const maxSize = Math.max(sizeX, sizeY);
-
-    const fovRad = threeCamera.fov * (Math.PI / 180);
-    const distance = (maxSize / 2) / Math.tan(fovRad / 2) * 1.5;
-
-    threeCamera.position.set(cx, cy, cz + Math.max(distance, 0.15));
+    threeCamera.position.set(cx, cy, cz + Math.max(dist, 0.15));
     controls.target.set(cx, cy, cz);
     controls.update();
-
-    console.log(`[Camera] Auto-centered — center: (${cx.toFixed(4)}, ${cy.toFixed(4)}, ${cz.toFixed(4)}), dist: ${distance.toFixed(4)}`);
 }
 
 /**
- * Build or update the 3D face mesh with healing deformation applied.
- * If a camera texture was captured, it is UV-mapped onto the mesh.
- * Healing effects (bruising, swelling) are blended via vertex colors.
+ * Build or update the 3D face mesh with healing deformation + texture.
  */
 function buildFaceMesh(day) {
     if (!baseLandmarks || !zoneWeights) return;
@@ -702,175 +759,115 @@ function buildFaceMesh(day) {
     const state = healingModel.evaluate(day);
     const hasTexture = capturedTexture && capturedUVs;
 
-    // Remove previous mesh
+    // Remove previous
     if (faceMesh) {
         scene.remove(faceMesh);
         faceMesh.geometry.dispose();
         faceMesh.material.dispose();
         faceMesh = null;
     }
+    const oldPts = scene.getObjectByName('pointCloud');
+    if (oldPts) { scene.remove(oldPts); oldPts.geometry.dispose(); }
 
-    // Also remove point cloud if exists
-    const oldPoints = scene.getObjectByName('pointCloud');
-    if (oldPoints) { scene.remove(oldPoints); oldPoints.geometry.dispose(); }
+    const N = baseLandmarks.length;
+    const positions = new Float32Array(N * 3);
+    const colors = new Float32Array(N * 3);
+    const uvs = hasTexture ? new Float32Array(N * 2) : null;
 
-    const positions = new Float32Array(baseLandmarks.length * 3);
-    const normals3 = new Float32Array(baseLandmarks.length * 3);
-    const colors = new Float32Array(baseLandmarks.length * 3);
-    const uvs = new Float32Array(baseLandmarks.length * 2);
-
-    const displacementM = state.nasalVolumeDelta / 1000; // mm -> meters
-
-    // Skin base color (used when no texture or in demo mode)
+    const displacementM = state.nasalVolumeDelta / 1000;
     const skinR = 0.85, skinG = 0.72, skinB = 0.62;
 
-    for (let i = 0; i < baseLandmarks.length; i++) {
+    for (let i = 0; i < N; i++) {
         const lm = baseLandmarks[i];
         const n = faceNormals[i];
         const zw = zoneWeights[i];
 
-        // ── Swelling deformation ──
+        // Swelling deformation
         const swellW = FaceZones.getSwellingWeight(zw);
-        const dx = n.x * displacementM * swellW;
-        const dy = n.y * displacementM * swellW;
-        const dz = n.z * displacementM * swellW;
+        positions[i * 3]     = lm.x + n.x * displacementM * swellW;
+        positions[i * 3 + 1] = lm.y + n.y * displacementM * swellW;
+        positions[i * 3 + 2] = lm.z + n.z * displacementM * swellW;
 
-        positions[i * 3]     = lm.x + dx;
-        positions[i * 3 + 1] = lm.y + dy;
-        positions[i * 3 + 2] = lm.z + dz;
-
-        normals3[i * 3]     = n.x;
-        normals3[i * 3 + 1] = n.y;
-        normals3[i * 3 + 2] = n.z;
-
-        // ── UV coordinates (from original 2D landmark positions) ──
-        if (capturedUVs) {
+        // UV
+        if (uvs && capturedUVs[i]) {
             uvs[i * 2]     = capturedUVs[i].u;
             uvs[i * 2 + 1] = capturedUVs[i].v;
         }
 
-        // ── Vertex colors ──
-        // When we have a texture, vertex colors act as a MULTIPLIER on the texture.
-        // White (1,1,1) = show texture as-is. Tinted = overlay healing effects.
+        // Vertex colors
         let r, g, b;
 
         if (showZones) {
-            // Zone visualization mode: color by zone (overrides texture)
             const [zr, zg, zb] = zw.color || [0.15, 0.15, 0.15];
             const mix = Math.max(0.2, zw.weight);
             r = skinR * (1 - mix) + zr * mix;
             g = skinG * (1 - mix) + zg * mix;
             b = skinB * (1 - mix) + zb * mix;
         } else if (hasTexture) {
-            // ── TEXTURE MODE: start white, apply healing tints ──
+            // White = show texture as-is. Tinting = healing overlay.
             r = 1.0; g = 1.0; b = 1.0;
 
-            // Bruise overlay: tint vertex colors toward bruise color
+            // Bruise tint
             const bruiseW = FaceZones.getBruisingWeight(zw);
-            const bruiseIntensity = state.bruisingLevel * bruiseW;
-            if (bruiseIntensity > 0.01) {
+            const bruiseI = state.bruisingLevel * bruiseW;
+            if (bruiseI > 0.01) {
                 const [br, bg, bb] = state.bruiseColor;
-                const strength = bruiseIntensity * 0.65;
-                r = r * (1 - strength) + br * strength;
-                g = g * (1 - strength) + bg * strength;
-                b = b * (1 - strength) + bb * strength;
-                // Darken bruised areas
-                const darken = 1.0 - bruiseIntensity * 0.2;
-                r *= darken; g *= darken; b *= darken;
+                const s = bruiseI * 0.6;
+                r = r * (1 - s) + br * s;
+                g = g * (1 - s) + bg * s;
+                b = b * (1 - s) + bb * s;
+                const dk = 1.0 - bruiseI * 0.2;
+                r *= dk; g *= dk; b *= dk;
             }
 
-            // Swelling redness (mild flushing)
-            const swellRedness = state.swellingLevel * swellW * 0.08;
-            if (swellRedness > 0.01) {
-                r = Math.min(1, r + swellRedness * 0.5);
-                g = Math.max(0, g - swellRedness * 0.15);
-                b = Math.max(0, b - swellRedness * 0.1);
-            }
+            // Swelling redness
+            const sr = state.swellingLevel * swellW * 0.06;
+            if (sr > 0.01) { r = Math.min(1, r + sr * 0.4); g -= sr * 0.1; b -= sr * 0.08; }
         } else {
-            // ── NO TEXTURE (demo mode): use skin vertex colors ──
+            // Demo mode: skin colors
             r = skinR; g = skinG; b = skinB;
 
             const bruiseW = FaceZones.getBruisingWeight(zw);
-            const bruiseIntensity = state.bruisingLevel * bruiseW;
-            if (bruiseIntensity > 0.01) {
+            const bruiseI = state.bruisingLevel * bruiseW;
+            if (bruiseI > 0.01) {
                 const [br, bg, bb] = state.bruiseColor;
-                r = skinR * (1 - bruiseIntensity * 0.7) + br * bruiseIntensity * 0.7;
-                g = skinG * (1 - bruiseIntensity * 0.7) + bg * bruiseIntensity * 0.7;
-                b = skinB * (1 - bruiseIntensity * 0.7) + bb * bruiseIntensity * 0.7;
-                const darken = 1.0 - bruiseIntensity * 0.15;
-                r *= darken; g *= darken; b *= darken;
+                r = skinR * (1 - bruiseI * 0.7) + br * bruiseI * 0.7;
+                g = skinG * (1 - bruiseI * 0.7) + bg * bruiseI * 0.7;
+                b = skinB * (1 - bruiseI * 0.7) + bb * bruiseI * 0.7;
+                r *= (1 - bruiseI * 0.15); g *= (1 - bruiseI * 0.15); b *= (1 - bruiseI * 0.15);
             }
-
-            const swellRedness = state.swellingLevel * swellW * 0.12;
-            r = Math.min(1, r + swellRedness);
-            g = Math.max(0, g - swellRedness * 0.3);
+            const sr = state.swellingLevel * swellW * 0.12;
+            r = Math.min(1, r + sr); g = Math.max(0, g - sr * 0.3);
         }
 
-        colors[i * 3]     = r;
-        colors[i * 3 + 1] = g;
-        colors[i * 3 + 2] = b;
+        colors[i * 3] = Math.max(0, Math.min(1, r));
+        colors[i * 3 + 1] = Math.max(0, Math.min(1, g));
+        colors[i * 3 + 2] = Math.max(0, Math.min(1, b));
     }
 
-    // ── Build geometry ──
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('normal', new THREE.BufferAttribute(normals3, 3));
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    // Build geometry
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    if (uvs) geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
 
-    if (capturedUVs) {
-        geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-    }
+    if (triangleIndices && triangleIndices.length > 0) {
+        geo.setIndex(new THREE.BufferAttribute(triangleIndices, 1));
+        geo.computeVertexNormals();
 
-    const hasTriangles = triangleIndices && triangleIndices.length > 0;
-
-    // Determine which triangle indices to use
-    let activeIndices = null;
-    if (hasTriangles) {
-        activeIndices = triangleIndices;
-    } else {
-        const fallbackIndices = buildFallbackTriangulation(baseLandmarks);
-        if (fallbackIndices && fallbackIndices.length > 0) {
-            activeIndices = new Uint32Array(fallbackIndices);
-        }
-    }
-
-    if (activeIndices && activeIndices.length > 0) {
-        geometry.setIndex(new THREE.BufferAttribute(activeIndices, 1));
-        geometry.computeVertexNormals();
-
-        // Material: texture + vertex colors (vertex colors multiply with texture)
-        const useTextureInMaterial = hasTexture && !showZones;
-
-        const material = new THREE.MeshStandardMaterial({
-            map: useTextureInMaterial ? capturedTexture : null,
+        const mat = new THREE.MeshStandardMaterial({
+            map: (hasTexture && !showZones) ? capturedTexture : null,
             vertexColors: true,
             roughness: 0.6,
             metalness: 0.0,
             side: THREE.DoubleSide,
-            flatShading: !hasTriangles, // flat shading only for fallback triangulation
+            flatShading: false,
         });
 
-        faceMesh = new THREE.Mesh(geometry, material);
+        faceMesh = new THREE.Mesh(geo, mat);
         faceMesh.name = 'faceMesh';
         scene.add(faceMesh);
-
-        console.log(`[Mesh] Built ${useTextureInMaterial ? 'textured' : 'colored'} mesh with ${activeIndices.length / 3} triangles`);
     }
-
-    // Always add point cloud (visible through mesh edges or standalone)
-    const pointGeometry = new THREE.BufferGeometry();
-    pointGeometry.setAttribute('position', new THREE.BufferAttribute(positions.slice(), 3));
-    pointGeometry.setAttribute('color', new THREE.BufferAttribute(colors.slice(), 3));
-
-    const pointMaterial = new THREE.PointsMaterial({
-        size: activeIndices ? 0.001 : 0.004,
-        vertexColors: true,
-        sizeAttenuation: true,
-    });
-
-    const pointCloud = new THREE.Points(pointGeometry, pointMaterial);
-    pointCloud.name = 'pointCloud';
-    scene.add(pointCloud);
 
     // Update UI
     updateViewerUI(state);
@@ -887,10 +884,9 @@ function showScreen(screen) {
 
     if (screen === 'scan') {
         stableFrames = 0;
-        // Reset camera UI from previous error state
         document.getElementById('capture-btn').style.display = '';
-        const fallbackBtn = document.getElementById('camera-fallback-btn');
-        if (fallbackBtn) fallbackBtn.remove();
+        const fb = document.getElementById('camera-fallback-btn');
+        if (fb) fb.remove();
         startCamera();
     }
 }
@@ -906,13 +902,12 @@ function updateViewerUI(state) {
     if (d === 0) dayLabel.textContent = 'Surgery Day';
     else if (d === 1) dayLabel.textContent = 'Day 1';
     else if (d < 30) dayLabel.textContent = `Day ${Math.round(d)}`;
-    else if (d < 365) dayLabel.textContent = `${Math.round(d / 30)} month${Math.round(d/30) > 1 ? 's' : ''}`;
+    else if (d < 365) dayLabel.textContent = `${Math.round(d / 30)} month${Math.round(d / 30) > 1 ? 's' : ''}`;
     else dayLabel.textContent = '12 months';
 
     swellPct.textContent = `${Math.round(state.swellingLevel * 100)}%`;
     swellPct.className = 'stat-value ' + (
-        state.swellingLevel > 0.6 ? 'high' :
-        state.swellingLevel > 0.3 ? 'med' :
+        state.swellingLevel > 0.6 ? 'high' : state.swellingLevel > 0.3 ? 'med' :
         state.swellingLevel > 0.1 ? 'low' : 'min'
     );
 
@@ -920,7 +915,7 @@ function updateViewerUI(state) {
         bruiseRow.style.display = 'flex';
         bruisePct.textContent = `${Math.round(state.bruisingLevel * 100)}%`;
         const [br, bg, bb] = state.bruiseColor;
-        bruiseDot.style.backgroundColor = `rgb(${Math.round(br*255)},${Math.round(bg*255)},${Math.round(bb*255)})`;
+        bruiseDot.style.backgroundColor = `rgb(${Math.round(br * 255)},${Math.round(bg * 255)},${Math.round(bb * 255)})`;
     } else {
         bruiseRow.style.display = 'none';
     }
@@ -948,20 +943,16 @@ function updateProfile() {
 function buildZoneLegend() {
     const container = document.getElementById('zone-legend');
     container.innerHTML = '';
-
     for (const [name, zone] of Object.entries(FaceZones.ZONES)) {
         const item = document.createElement('div');
         item.className = 'legend-item';
-
         const dot = document.createElement('span');
         dot.className = 'legend-dot';
         const [r, g, b] = zone.color;
-        dot.style.backgroundColor = `rgb(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)})`;
-
+        dot.style.backgroundColor = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
         const label = document.createElement('span');
         label.className = 'legend-label';
         label.textContent = `${zone.label} (${Math.round(zone.weight * 100)}%)`;
-
         item.appendChild(dot);
         item.appendChild(label);
         container.appendChild(item);
@@ -973,66 +964,44 @@ function buildZoneLegend() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function init() {
-    // Splash
     document.getElementById('start-btn').addEventListener('click', () => showScreen('scan'));
     document.getElementById('demo-btn').addEventListener('click', useSampleFace);
-
-    // Scan
     document.getElementById('capture-btn').addEventListener('click', captureFace);
     document.getElementById('scan-back-btn').addEventListener('click', () => showScreen('splash'));
 
-    // Viewer
     document.getElementById('viewer-back-btn').addEventListener('click', () => {
         showScreen('splash');
-        // cleanup
         if (faceMesh) { scene.remove(faceMesh); }
         baseLandmarks = null;
-        // Dispose texture
-        if (capturedTexture) {
-            capturedTexture.dispose();
-            capturedTexture = null;
-        }
+        if (capturedTexture) { capturedTexture.dispose(); capturedTexture = null; }
         capturedUVs = null;
     });
 
-    // Timeline slider
-    const slider = document.getElementById('timeline-slider');
-    slider.addEventListener('input', (e) => {
-        setDay(parseFloat(e.target.value));
-    });
+    document.getElementById('timeline-slider').addEventListener('input', (e) => setDay(parseFloat(e.target.value)));
 
-    // Preset buttons
     document.querySelectorAll('.preset-btn').forEach(btn => {
         btn.addEventListener('click', () => {
-            const day = parseFloat(btn.dataset.day);
-            setDay(day);
-            // Highlight active preset
+            setDay(parseFloat(btn.dataset.day));
             document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
         });
     });
 
-    // Settings
     document.getElementById('opt-skin').addEventListener('change', updateProfile);
     document.getElementById('opt-intensity').addEventListener('change', updateProfile);
     document.getElementById('opt-bruising').addEventListener('change', updateProfile);
 
-    // Zone toggle
     document.getElementById('zone-toggle').addEventListener('change', (e) => {
         showZones = e.target.checked;
         buildFaceMesh(currentDay);
         document.getElementById('zone-legend').style.display = showZones ? 'block' : 'none';
     });
 
-    // Disclaimer
     document.getElementById('disclaimer-ok').addEventListener('click', () => {
         document.getElementById('disclaimer-modal').style.display = 'none';
     });
 
-    // Build zone legend
     buildZoneLegend();
-
-    // Init MediaPipe
     initMediaPipe();
 }
 
