@@ -121,6 +121,14 @@ async function startCamera() {
     const video = document.getElementById('camera-video');
     const canvas = document.getElementById('camera-overlay');
     const ctx = canvas.getContext('2d');
+    const instructionEl = document.getElementById('scan-instruction');
+
+    // Check secure context (camera requires HTTPS or localhost)
+    if (!window.isSecureContext || !navigator.mediaDevices) {
+        console.warn('[Camera] Not a secure context — camera unavailable');
+        showCameraError(instructionEl, 'Camera requires HTTPS. Use localhost or enable HTTPS.');
+        return;
+    }
 
     try {
         videoStream = await navigator.mediaDevices.getUserMedia({
@@ -136,7 +144,44 @@ async function startCamera() {
         detectLoop(video, canvas, ctx);
     } catch (err) {
         console.error('[Camera]', err);
-        document.getElementById('scan-instruction').textContent = 'Camera access denied. Please allow camera.';
+        if (err.name === 'NotAllowedError') {
+            showCameraError(instructionEl, 'Camera access denied. Please allow camera in browser settings.');
+        } else if (err.name === 'NotFoundError') {
+            showCameraError(instructionEl, 'No camera found on this device.');
+        } else if (err.name === 'NotReadableError') {
+            showCameraError(instructionEl, 'Camera is in use by another app.');
+        } else {
+            showCameraError(instructionEl, 'Camera error: ' + (err.message || err.name));
+        }
+    }
+}
+
+/**
+ * Show camera error with a fallback button to use demo mode.
+ */
+function showCameraError(instructionEl, message) {
+    const bottomEl = document.querySelector('.scan-bottom');
+    instructionEl.textContent = message;
+
+    // Hide the capture button
+    document.getElementById('capture-btn').style.display = 'none';
+
+    // Add fallback button if not already present
+    if (!document.getElementById('camera-fallback-btn')) {
+        const fallbackBtn = document.createElement('button');
+        fallbackBtn.id = 'camera-fallback-btn';
+        fallbackBtn.className = 'btn-primary';
+        fallbackBtn.textContent = 'Use Demo Mode Instead';
+        fallbackBtn.style.maxWidth = '260px';
+        fallbackBtn.addEventListener('click', () => {
+            // Cleanup
+            if (videoStream) {
+                videoStream.getTracks().forEach(t => t.stop());
+                videoStream = null;
+            }
+            useSampleFace();
+        });
+        bottomEl.appendChild(fallbackBtn);
     }
 }
 
@@ -591,6 +636,10 @@ function showScreen(screen) {
 
     if (screen === 'scan') {
         stableFrames = 0;
+        // Reset camera UI from previous error state
+        document.getElementById('capture-btn').style.display = '';
+        const fallbackBtn = document.getElementById('camera-fallback-btn');
+        if (fallbackBtn) fallbackBtn.remove();
         startCamera();
     }
 }

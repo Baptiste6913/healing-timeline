@@ -25,6 +25,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
         super().end_headers()
 
+socketserver.TCPServer.allow_reuse_address = True
+
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 print(f"Serving from {os.getcwd()} on http://localhost:{PORT}")
 with socketserver.TCPServer(("", PORT), Handler) as httpd:

@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where:*)",
+      "Bash(python:*)",
+      "Bash(\"C:/Users/bapti/AppData/Local/Python/bin/python.exe\" \"C:/Users/bapti/Downloads/healing timeline simulation/web/icons/generate_icons.py\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(lsof:*)",
+      "Bash(netstat:*)",
+      "Bash(\"C:\\\\Users\\\\bapti\\\\AppData\\\\Local\\\\Python\\\\bin\\\\python.exe\" --version)",
+      "Bash(ipconfig:*)",
+      "Bash(py:*)",
+      "Bash(taskkill:*)",
+      "Bash(ssh:*)",
+      "Bash(pip install:*)",
+      "Bash(winget install:*)",
+      "Bash(git config:*)",
+      "Bash(export PATH=\"/c/Program Files/GitHub CLI:$PATH\")",
+      "Bash(gh auth:*)",
+      "Bash(git remote add:*)"
+    ]
+  }
+}

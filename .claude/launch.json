@@ -4,7 +4,7 @@
     {
       "name": "healing-web",
       "runtimeExecutable": "C:\\Users\\bapti\\AppData\\Local\\Python\\bin\\python.exe",
-      "runtimeArgs": ["-m", "http.server", "4567", "--directory", "C:\\Users\\bapti\\Downloads\\healing timeline simulation\\web"],
+      "runtimeArgs": ["C:\\Users\\bapti\\Downloads\\healing timeline simulation\\web\\server.py"],
       "port": 4567
     }
   ]
