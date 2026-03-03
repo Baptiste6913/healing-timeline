@@ -78,7 +78,8 @@ enum SampleMeshLoader {
             normals: normals,
             triangleIndices: indices,
             textureCoordinates: nil,
-            zoneWeights: zoneWeights
+            zoneWeights: zoneWeights,
+            scanMode: .demo
         )
     }
 }

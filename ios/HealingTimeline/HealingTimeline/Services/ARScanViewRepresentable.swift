@@ -47,8 +47,13 @@ final class ARScanCoordinator: NSObject, ARSessionDelegate {
         guard let viewModel = viewModel else { return }
 
         if let faceAnchor = anchors.compactMap({ $0 as? ARFaceAnchor }).first {
+            // Grab the current frame for depth data + camera transform
+            let currentFrame = session.currentFrame
             Task { @MainActor in
-                viewModel.updateTracking(anchor: faceAnchor)
+                viewModel.updateTracking(
+                    anchor: faceAnchor,
+                    frame: currentFrame
+                )
             }
         }
     }
